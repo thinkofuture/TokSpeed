@@ -1,0 +1,76 @@
+<p align="center">
+  <img src="Resources/AppIcon.png" alt="TokSpeed logo" width="120" />
+</p>
+
+<h1 align="center">TokSpeed</h1>
+
+<p align="center">
+  <strong>Your AI's pace, at a glance.</strong>
+</p>
+
+<p align="center">
+  <strong>English</strong> · <a href="README.zh-CN.md">简体中文</a>
+</p>
+
+---
+
+TokSpeed is a lightweight macOS menu bar app that reads local records from **Codex, OpenCode, Claude Code, and Antigravity** to show token generation speed and recent call trends. No API key or extra model calls required.
+
+## Build & Run
+
+Requires **macOS 13 or later** and Xcode Command Line Tools with support for Swift 5 language mode. TokSpeed uses the system AppKit and SQLite libraries, with no third-party dependencies to download. The build targets your current Mac's architecture (Apple Silicon or Intel); it is not a universal binary.
+
+Install the command line tools if needed:
+
+```sh
+xcode-select --install
+```
+
+Download or clone this repository, then run these commands from the repository directory:
+
+```sh
+bash scripts/build.sh
+open build/TokSpeed.app
+```
+
+The app appears only in the menu bar, not in the Dock. Click its icon to see each source, choose the source shown in the menu bar, or quit. Sources without records show a no-data state. **The app interface is currently in Simplified Chinese; the language links above switch the documentation only.**
+
+You can drag `build/TokSpeed.app` to your Applications folder. To uninstall, quit and delete the app. The source preference is stored in macOS UserDefaults; after quitting, you can clear it with `defaults delete io.github.thinkofuture.tokspeed`.
+
+TokSpeed is currently distributed as source code. The build script applies local ad-hoc signing only, without Developer ID signing or Apple notarization. It generates the macOS app icon from the checked-in `Resources/AppIcon.png` using system tools.
+
+## Data Sources & Privacy
+
+| Source | Default location |
+| --- | --- |
+| Codex | Rollout JSONL files in `~/.codex/sessions/` and `~/.codex/archived_sessions/`; respects `CODEX_HOME` |
+| OpenCode | `~/.local/share/opencode/opencode.db`; supports the V1/V2 table layouts implemented in the reader |
+| Claude Code | JSONL files in `~/.claude/projects/`, excluding subagent records; respects `CLAUDE_CONFIG_DIR` |
+| Antigravity | `~/.gemini/antigravity/conversation_summaries.db` and `conversations/*.db` |
+
+- You do not need to install every supported tool. Each reader selects recent records independently of the foreground window.
+- Local logs may contain conversation content. TokSpeed reads those files and parses the fields needed for statistics; it does not upload data, initiate network requests, or modify source logs or databases. SQLite databases are opened read-only.
+- TokSpeed saves only the menu bar source preference, not separate copies of chats. Command line diagnostics may print session IDs and local paths; redact them before sharing output.
+- Apps launched from Finder generally do not inherit your terminal's environment variables. For custom directories, set the relevant variables and launch the executable inside the app directly from your terminal.
+
+## Measurements & Limitations
+
+Speeds are estimates based on local records: **not instantaneous per-token measurements, and not a controlled benchmark across tools.**
+
+- For Codex, OpenCode, and Claude Code, the current-turn speed uses completed calls: total output tokens divided by the sum of their recorded durations. While waiting for the first call to finish, the menu bar may show only elapsed seconds.
+- Timing boundaries depend on each tool's records and may include time to first token or other overhead. Claude Code requires request-start records and measures up to the first complete output block; missing fields can result in no data.
+- Antigravity shows the last call's output tokens divided by time to first token plus streaming duration. It updates only after the call completes.
+- Output token counts follow each source's reporting and may include reasoning tokens. Sparklines show up to 12 recent calls, not per-second samples; each source uses its own vertical scale.
+- Upstream local formats are not stable interfaces controlled by TokSpeed. Tool updates, custom data paths, or missing fields may cause missing data or inaccurate estimates. Comprehensive compatibility with specific tool versions is not guaranteed.
+
+## Basic Checks
+
+After building, check panel states, light/dark colors, the app and provider icons, and the Codex partial-write regression without reading real conversations:
+
+```sh
+build/TokSpeed.app/Contents/MacOS/TokSpeed --test-panel
+```
+
+## License
+
+Project code is licensed under the [MIT License](LICENSE). Third-party icon sources and license notices are listed in [Resources/Logos/NOTICE.md](Resources/Logos/NOTICE.md) and bundled with the app. Brands and trademarks belong to their respective owners. TokSpeed is not affiliated with or endorsed by those vendors; the code license does not grant trademark rights.

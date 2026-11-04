@@ -1,0 +1,22 @@
+# Local build output and macOS metadata
+/build/
+/.build/
+.DS_Store
+
+# Local configuration, credentials and private session data
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+*.provisionprofile
+*.jsonl
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.log
