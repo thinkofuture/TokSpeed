@@ -1,8 +1,8 @@
-<p align="center"><img src="Resources/AppIcon.png" alt="Logo TokSpeed" width="120" /></p>
+<p align="center"><img src="../../Resources/AppIcon.png" alt="Logo TokSpeed" width="120" /></p>
 <h1 align="center">TokSpeed</h1>
 <p align="center"><strong>Vérifiez dans la barre des menus si votre IA se la coule douce.</strong></p>
 <p align="center">
-  <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ko.md">한국어</a> · <a href="README.de.md">Deutsch</a> · <strong>Français</strong> · <a href="README.es.md">Español</a>
+  <a href="../../README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ko.md">한국어</a> · <a href="README.de.md">Deutsch</a> · <strong>Français</strong> · <a href="README.es.md">Español</a>
 </p>
 
 ---
@@ -68,4 +68,4 @@ Ajoutez `-AppleLanguages '("fr-FR")'` pour choisir la langue et `--preview-direc
 
 ## Licence
 
-Le code est sous [MIT License](LICENSE). Les sources et licences des icônes tierces figurent dans [Resources/Logos/NOTICE.md](Resources/Logos/NOTICE.md), fourni avec l’application. Les marques appartiennent à leurs propriétaires. TokSpeed n’est ni affilié aux fournisseurs ni approuvé par eux ; la licence du code n’accorde aucun droit sur les marques.
+Le code est sous [MIT License](../../LICENSE). Les sources et licences des icônes tierces figurent dans [Resources/Logos/NOTICE.md](../../Resources/Logos/NOTICE.md), fourni avec l’application. Les marques appartiennent à leurs propriétaires. TokSpeed n’est ni affilié aux fournisseurs ni approuvé par eux ; la licence du code n’accorde aucun droit sur les marques.

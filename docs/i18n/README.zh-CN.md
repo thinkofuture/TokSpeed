@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="Resources/AppIcon.png" alt="TokSpeed 图标" width="120" />
+  <img src="../../Resources/AppIcon.png" alt="TokSpeed 图标" width="120" />
 </p>
 
 <h1 align="center">TokSpeed</h1>
@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · <strong>简体中文</strong> · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ko.md">한국어</a> · <a href="README.de.md">Deutsch</a> · <a href="README.fr.md">Français</a> · <a href="README.es.md">Español</a>
+  <a href="../../README.md">English</a> · <strong>简体中文</strong> · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ko.md">한국어</a> · <a href="README.de.md">Deutsch</a> · <a href="README.fr.md">Français</a> · <a href="README.es.md">Español</a>
 </p>
 
 ---
@@ -80,4 +80,4 @@ build/TokSpeed.app/Contents/MacOS/TokSpeed --test-panel
 
 ## 许可证
 
-项目代码采用 [MIT License](LICENSE)。第三方图标来源及授权见 [Resources/Logos/NOTICE.md](Resources/Logos/NOTICE.md)，构建时随应用打包。品牌和商标归各自所有者所有，项目不代表相关厂商，也未获其背书；代码许可证不授予商标权。
+项目代码采用 [MIT License](../../LICENSE)。第三方图标来源及授权见 [Resources/Logos/NOTICE.md](../../Resources/Logos/NOTICE.md)，构建时随应用打包。品牌和商标归各自所有者所有，项目不代表相关厂商，也未获其背书；代码许可证不授予商标权。

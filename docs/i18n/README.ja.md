@@ -1,8 +1,8 @@
-<p align="center"><img src="Resources/AppIcon.png" alt="TokSpeed アイコン" width="120" /></p>
+<p align="center"><img src="../../Resources/AppIcon.png" alt="TokSpeed アイコン" width="120" /></p>
 <h1 align="center">TokSpeed</h1>
 <p align="center"><strong>AI がサボっていないか、メニューバーでチェック。</strong></p>
 <p align="center">
-  <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.zh-TW.md">繁體中文</a> · <strong>日本語</strong> · <a href="README.ko.md">한국어</a> · <a href="README.de.md">Deutsch</a> · <a href="README.fr.md">Français</a> · <a href="README.es.md">Español</a>
+  <a href="../../README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.zh-TW.md">繁體中文</a> · <strong>日本語</strong> · <a href="README.ko.md">한국어</a> · <a href="README.de.md">Deutsch</a> · <a href="README.fr.md">Français</a> · <a href="README.es.md">Español</a>
 </p>
 
 ---
@@ -68,4 +68,4 @@ build/TokSpeed.app/Contents/MacOS/TokSpeed --test-panel
 
 ## ライセンス
 
-コードは [MIT License](LICENSE) です。第三者アイコンの出典・ライセンスは [Resources/Logos/NOTICE.md](Resources/Logos/NOTICE.md) に記載し、アプリにも同梱します。ブランド・商標は各所有者に帰属します。本プロジェクトは各ベンダーと提携せず、推奨も受けていません。コードのライセンスは商標権を付与しません。
+コードは [MIT License](../../LICENSE) です。第三者アイコンの出典・ライセンスは [Resources/Logos/NOTICE.md](../../Resources/Logos/NOTICE.md) に記載し、アプリにも同梱します。ブランド・商標は各所有者に帰属します。本プロジェクトは各ベンダーと提携せず、推奨も受けていません。コードのライセンスは商標権を付与しません。

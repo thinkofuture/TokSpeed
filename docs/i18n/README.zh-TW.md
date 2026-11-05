@@ -1,8 +1,8 @@
-<p align="center"><img src="Resources/AppIcon.png" alt="TokSpeed 圖示" width="120" /></p>
+<p align="center"><img src="../../Resources/AppIcon.png" alt="TokSpeed 圖示" width="120" /></p>
 <h1 align="center">TokSpeed</h1>
 <p align="center"><strong>在選單列檢查 AI 有沒有偷懶</strong></p>
 <p align="center">
-  <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <strong>繁體中文</strong> · <a href="README.ja.md">日本語</a> · <a href="README.ko.md">한국어</a> · <a href="README.de.md">Deutsch</a> · <a href="README.fr.md">Français</a> · <a href="README.es.md">Español</a>
+  <a href="../../README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <strong>繁體中文</strong> · <a href="README.ja.md">日本語</a> · <a href="README.ko.md">한국어</a> · <a href="README.de.md">Deutsch</a> · <a href="README.fr.md">Français</a> · <a href="README.es.md">Español</a>
 </p>
 
 ---
@@ -68,4 +68,4 @@ build/TokSpeed.app/Contents/MacOS/TokSpeed --test-panel
 
 ## 授權
 
-程式碼採 [MIT License](LICENSE)。第三方圖示來源與授權見 [Resources/Logos/NOTICE.md](Resources/Logos/NOTICE.md)，並隨應用程式提供。品牌與商標屬於各自擁有者；本專案不代表相關廠商，也未獲其背書。程式碼授權不授予商標權。
+程式碼採 [MIT License](../../LICENSE)。第三方圖示來源與授權見 [Resources/Logos/NOTICE.md](../../Resources/Logos/NOTICE.md)，並隨應用程式提供。品牌與商標屬於各自擁有者；本專案不代表相關廠商，也未獲其背書。程式碼授權不授予商標權。
