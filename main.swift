@@ -738,7 +738,7 @@ enum SourceMode: String {
 
     var label: String {
         switch self {
-        case .auto: return "跟随最近活动"
+        case .auto: return L10n.text("Automatic")
         case .codex: return "Codex"
         case .opencode: return "OpenCode"
         case .claude: return "Claude Code"
@@ -754,6 +754,50 @@ enum SourceMode: String {
         case .antigravity: return "moon.stars.fill"
         }
     }
+}
+
+enum ToolOrder {
+    // A static popularity-oriented default, not a measured or network-fetched ranking.
+    static let popular: [SourceMode] = [.claude, .codex, .opencode, .antigravity]
+
+    static func normalized(_ saved: [String]) -> [SourceMode] {
+        var result: [SourceMode] = []
+        for raw in saved + popular.map(\.rawValue) {
+            if let source = SourceMode(rawValue: raw), source != .auto, !result.contains(source) {
+                result.append(source)
+            }
+        }
+        return result
+    }
+
+    static func moving(_ source: SourceMode, by offset: Int, in order: [SourceMode]) -> [SourceMode] {
+        guard let index = order.firstIndex(of: source), order.indices.contains(index + offset) else { return order }
+        var result = order
+        result.swapAt(index, index + offset)
+        return result
+    }
+}
+
+enum StatusDisplay: String, CaseIterable {
+    case speedAndUnit, numbersOnly, iconOnly
+
+    var label: String {
+        switch self {
+        case .speedAndUnit: return L10n.text("Number and unit")
+        case .numbersOnly: return L10n.text("Number only")
+        case .iconOnly: return L10n.text("Icon only")
+        }
+    }
+
+    func title(active: Bool, speed: Double?, elapsed: Double) -> String {
+        guard active, self != .iconOnly else { return "" }
+        if let speed, speed.isFinite, speed > 0 {
+            return Fmt.tps(speed) + (self == .speedAndUnit ? " tok/s" : "")
+        }
+        return "\(Int(max(0, elapsed)))" + (self == .speedAndUnit ? " s" : "")
+    }
+
+    func usesLightning(active: Bool) -> Bool { !active || self == .iconOnly }
 }
 
 enum ProviderLogo {
@@ -851,22 +895,22 @@ struct SpeedSummary {
     var recent: [Double] { Array(history.filter { $0.isFinite && $0 > 0 }.suffix(12)) }
 
     func caption(now: Date = Date()) -> String {
-        if current != nil { return "本轮" }
-        guard valid(last) != nil else { return active ? "等待数据" : "暂无数据" }
-        guard let date = completedAt else { return "上次" }
+        if current != nil { return L10n.text("This turn") }
+        guard valid(last) != nil else { return active ? L10n.text("Waiting for data") : L10n.text("No data") }
+        guard let date = completedAt else { return L10n.text("Last call") }
         let age = max(0, now.timeIntervalSince(date))
         let time: String
-        if age < 5 { time = "刚刚" }
-        else if age < 60 { time = "\(Int(age)) 秒前" }
-        else if age < 3600 { time = "\(Int(age / 60)) 分钟前" }
-        else if age < 86400 { time = "\(Int(age / 3600)) 小时前" }
-        else { time = "\(Int(age / 86400)) 天前" }
-        return "上次 · \(time)"
+        if age < 5 { time = L10n.text("Just now") }
+        else if age < 60 { time = L10n.text("%d s ago", Int(age)) }
+        else if age < 3600 { time = L10n.text("%d min ago", Int(age / 60)) }
+        else if age < 86400 { time = L10n.text("%d h ago", Int(age / 3600)) }
+        else { time = L10n.text("%d d ago", Int(age / 86400)) }
+        return L10n.text("Last · %@", time)
     }
 
     var tooltip: String {
         let identity = model.isEmpty ? name : "\(name) · \(model)"
-        return "\(identity)\n\(measurement)\n趋势：最近 \(recent.count) 次调用，独立纵轴；非逐秒数据。"
+        return "\(identity)\n\(measurement)\n" + L10n.text("Trend: last %d calls, independent scale; not per-second data.", recent.count)
     }
 }
 
@@ -892,19 +936,40 @@ final class SparklineView: NSView {
             NSPoint(x: area.minX + CGFloat(12 - values.count + index) * area.width / 11,
                     y: area.minY + CGFloat(value / peak) * area.height)
         }
-        let path = NSBezierPath()
+        let path = Self.smoothPath(points)
         path.lineWidth = 1.5
         path.lineJoinStyle = .round
         path.lineCapStyle = .round
-        for (index, point) in points.enumerated() {
-            if index == 0 { path.move(to: point) } else { path.line(to: point) }
-        }
         color.setStroke()
         path.stroke()
         if let last = points.last {
             color.setFill()
             NSBezierPath(ovalIn: NSRect(x: last.x - 2, y: last.y - 2, width: 4, height: 4)).fill()
         }
+    }
+
+    // Monotone cubic Hermite interpolation: smooth joins without inventing peaks
+    // or dipping below zero. One sample remains a dot; missing slots stay empty.
+    static func smoothPath(_ points: [NSPoint]) -> NSBezierPath {
+        let path = NSBezierPath()
+        guard let first = points.first else { return path }
+        path.move(to: first)
+        guard points.count > 1 else { return path }
+        let slopes = zip(points, points.dropFirst()).map { ($1.y - $0.y) / ($1.x - $0.x) }
+        var tangents = [slopes[0]]
+        for index in 1..<(points.count - 1) {
+            let left = slopes[index - 1], right = slopes[index]
+            tangents.append(left * right <= 0 ? 0 : 2 * left * right / (left + right))
+        }
+        tangents.append(slopes.last!)
+        for index in 0..<(points.count - 1) {
+            let start = points[index], end = points[index + 1]
+            let dx = (end.x - start.x) / 3
+            path.curve(to: end,
+                controlPoint1: NSPoint(x: start.x + dx, y: start.y + dx * tangents[index]),
+                controlPoint2: NSPoint(x: end.x - dx, y: end.y - dx * tangents[index + 1]))
+        }
+        return path
     }
 }
 
@@ -955,8 +1020,8 @@ final class SummaryMenuView: NSView {
         sparkline.color = color
         sparkline.values = summary.recent
         toolTip = summary.tooltip
-        let state = summary.active ? "活跃" : "空闲"
-        setAccessibilityLabel("\(summary.name)，\(state)，\(summary.caption())，\(summary.value) tokens 每秒")
+        let state = summary.active ? L10n.text("Active") : L10n.text("Idle")
+        setAccessibilityLabel(L10n.text("%@, %@, %@, %@ tokens per second", summary.name, state, summary.caption(), summary.value))
     }
 }
 
@@ -964,7 +1029,7 @@ final class PanelHeaderView: NSView {
     override var allowsVibrancy: Bool { false }
     override init(frame: NSRect) {
         super.init(frame: NSRect(x: 0, y: 0, width: 360, height: 34))
-        let title = NSTextField(labelWithString: "Token 速度")
+        let title = NSTextField(labelWithString: L10n.text("Token speed"))
         title.frame = NSRect(x: 16, y: 8, width: 180, height: 18)
         title.font = .systemFont(ofSize: 12, weight: .semibold)
         title.textColor = .labelColor
@@ -980,6 +1045,9 @@ final class PanelHeaderView: NSView {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    private let defaults: UserDefaults
+    private let detectInstalledTools: () -> Set<SourceMode>
+    private var installedSources: Set<SourceMode>
     private let reader = RolloutReader()
     private let oc = OpenCodeReader()
     private let claude = ClaudeReader()
@@ -991,27 +1059,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var selftest = false
     private var currentSymbol = "-"
     private var summaryItems: [SourceMode: NSMenuItem] = [:]
+    private var settingsController: SettingsWindowController?
+
+    private var settingsState: SettingsState {
+        SettingsState(sources: toolOrder, source: effectiveMode, display: display,
+            customOrder: defaults.stringArray(forKey: "toolOrder") != nil)
+    }
+
+    init(defaults: UserDefaults = .standard, detectInstalledTools: @escaping () -> Set<SourceMode> = { InstalledTools.detect() }) {
+        self.defaults = defaults
+        self.detectInstalledTools = detectInstalledTools
+        self.installedSources = detectInstalledTools()
+        super.init()
+    }
 
     private var mode: SourceMode {
-        get { SourceMode(rawValue: UserDefaults.standard.string(forKey: "sourceMode") ?? "auto") ?? .auto }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: "sourceMode") }
+        get { SourceMode(rawValue: defaults.string(forKey: "sourceMode") ?? "auto") ?? .auto }
+        set { defaults.set(newValue.rawValue, forKey: "sourceMode") }
+    }
+
+    private var display: StatusDisplay {
+        get { StatusDisplay(rawValue: defaults.string(forKey: "statusDisplay") ?? "") ?? .speedAndUnit }
+        set { defaults.set(newValue.rawValue, forKey: "statusDisplay") }
+    }
+
+    private var savedToolOrder: [SourceMode] {
+        ToolOrder.normalized(defaults.stringArray(forKey: "toolOrder") ?? [])
+    }
+
+    private var toolOrder: [SourceMode] { savedToolOrder.filter { installedSources.contains($0) } }
+    private var effectiveMode: SourceMode { installedSources.contains(mode) ? mode : .auto }
+
+    static func preferredSource(mode: SourceMode, activity: [(source: SourceMode, active: Bool, date: Date)]) -> SourceMode {
+        guard mode == .auto else { return mode }
+        let active = activity.filter(\.active)
+        return (active.isEmpty ? activity : active).max { $0.date < $1.date }?.source ?? .auto
     }
 
     private var activeSource: SourceMode {
-        switch mode {
-        case .codex: return .codex
-        case .opencode: return .opencode
-        case .claude: return .claude
-        case .antigravity: return .antigravity
-        case .auto:
-            let sources: [(SourceMode, Date)] = [
-                (.codex, max(reader.samples.last?.completedAt ?? .distantPast, reader.turnActive ? (reader.turnStart ?? .distantPast) : .distantPast)),
-                (.opencode, max(oc.samples.last?.completedAt ?? .distantPast, oc.inFlightStart ?? .distantPast)),
-                (.claude, max(claude.samples.last?.completedAt ?? .distantPast, claude.inFlightStart ?? .distantPast)),
-                (.antigravity, antigravity.available ? max(antigravity.samples.last?.completedAt ?? .distantPast, antigravity.inFlightStart ?? .distantPast) : .distantPast)
-            ]
-            return sources.max { $0.1 < $1.1 }?.0 ?? .codex
-        }
+        let activity: [(source: SourceMode, active: Bool, date: Date)] = [
+            (.codex, isCodexGenerating, max(reader.samples.last?.completedAt ?? .distantPast, reader.turnActive ? (reader.turnStart ?? .distantPast) : .distantPast)),
+            (.opencode, isOpenCodeGenerating, max(oc.samples.last?.completedAt ?? .distantPast, oc.inFlightStart ?? .distantPast)),
+            (.claude, claude.inFlightStart != nil, max(claude.samples.last?.completedAt ?? .distantPast, claude.inFlightStart ?? .distantPast)),
+            (.antigravity, antigravity.inFlightStart != nil, antigravity.available ? max(antigravity.samples.last?.completedAt ?? .distantPast, antigravity.inFlightStart ?? .distantPast) : .distantPast)
+        ]
+        return Self.preferredSource(mode: effectiveMode, activity: activity.filter { installedSources.contains($0.source) })
     }
 
     func applicationDidFinishLaunching(_ note: Notification) {
@@ -1056,35 +1148,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func refresh() {
         if Date().timeIntervalSince(lastScan) > 5 {
             lastScan = Date()
-            if let url = CodexHome.newestRollout() { reader.read(url) }
-            claude.poll()
-            antigravity.poll()
-        } else if !reader.path.isEmpty {
+            installedSources = detectInstalledTools()
+            if installedSources.contains(.codex), let url = CodexHome.newestRollout() { reader.read(url) }
+            if installedSources.contains(.claude) { claude.poll() }
+            if installedSources.contains(.antigravity) { antigravity.poll() }
+        } else if installedSources.contains(.codex), !reader.path.isEmpty {
             reader.read(URL(fileURLWithPath: reader.path))
         }
         if Date().timeIntervalSince(lastOpenCodePoll) > 2 {
             lastOpenCodePoll = Date()
-            oc.poll()
+            if installedSources.contains(.opencode) { oc.poll() }
         }
         updateTitle()
         updateSummaryItems()
+        settingsController?.update(settingsState)
     }
 
     private var isCodexGenerating: Bool {
-        reader.turnActive && reader.turnStart != nil
+        installedSources.contains(.codex) && reader.turnActive && reader.turnStart != nil
     }
 
     private var isOpenCodeGenerating: Bool {
-        oc.inFlightStart != nil
+        installedSources.contains(.opencode) && oc.inFlightStart != nil
     }
-
-    private let codexSymbol = NSImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
-    private let opencodeSymbol = NSImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
 
     private var generating: Bool {
         switch activeSource {
         case .opencode: return isOpenCodeGenerating
-        case .codex, .auto: return isCodexGenerating
+        case .codex: return isCodexGenerating
+        case .auto: return false
         case .claude: return claude.inFlightStart != nil
         case .antigravity: return antigravity.inFlightStart != nil
         }
@@ -1093,7 +1185,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func liveSpeed() -> Double? {
         switch activeSource {
         case .opencode: return oc.liveTPS()
-        case .codex, .auto: return reader.liveTPS()
+        case .codex: return reader.liveTPS()
+        case .auto: return nil
         case .claude: return claude.liveTPS()
         case .antigravity: return nil
         }
@@ -1104,7 +1197,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .opencode:
             guard let start = oc.inFlightStart else { return nil }
             return Date().timeIntervalSince(start)
-        case .codex, .auto:
+        case .auto: return nil
+        case .codex:
             guard let start = reader.turnStart, reader.turnActive else { return nil }
             return Date().timeIntervalSince(start)
         case .claude:
@@ -1117,42 +1211,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func updateTitle() {
-        guard let button = statusItem.button else { return }
-        let source = activeSource
-        currentSymbol = "logo-\(source.rawValue)"
-        button.image = ProviderLogo.image(source) ?? NSImage(systemSymbolName: source.symbol, accessibilityDescription: source.label)
-        button.imagePosition = .imageLeading
-        button.imageHugsTitle = false
-        button.attributedTitle = Fmt.statusTitle(titleText)
+        renderStatus(source: activeSource, active: generating, speed: liveSpeed(), elapsed: max(0, turnElapsed() ?? 0))
     }
 
-    private var titleText: String {
-        let button = statusItem.button
-        let source = activeSource
-        let name = source.label
-        guard generating else {
-            button?.toolTip = "\(name) 空闲（点开菜单查看历史速度）"
-            return ""
+    private func renderStatus(source: SourceMode, active: Bool, speed: Double?, elapsed: Double) {
+        guard let button = statusItem.button else { return }
+        let lightning = display.usesLightning(active: active)
+        currentSymbol = lightning ? "bolt.fill" : "logo-\(source.rawValue)"
+        button.image = lightning
+            ? NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: "TokSpeed")
+            : ProviderLogo.image(source) ?? NSImage(systemSymbolName: source.symbol, accessibilityDescription: source.label)
+        button.image?.isTemplate = true
+        button.imagePosition = .imageLeading
+        button.imageHugsTitle = false
+        button.attributedTitle = Fmt.statusTitle(display.title(active: active, speed: speed, elapsed: elapsed))
+        if source == .auto {
+            button.toolTip = L10n.text("No tools installed")
+        } else if !active {
+            button.toolTip = L10n.text("%@ is idle. Open the menu for speed history.", source.label)
+        } else if let speed {
+            button.toolTip = L10n.text("%@: %@ tok/s this turn (%d s elapsed)", source.label, Fmt.tps(speed), Int(elapsed))
+        } else {
+            button.toolTip = L10n.text("%@ is generating (%d s elapsed)", source.label, Int(elapsed))
         }
-        if let live = liveSpeed() {
-            let elapsed = Int(turnElapsed() ?? 0)
-            button?.toolTip = "\(name) 本次回复实时速度 \(Fmt.tps(live)) tok/s（已用 \(elapsed) 秒）"
-            return Fmt.tps(live)
-        }
-        let secs = Int(turnElapsed() ?? 0)
-        button?.toolTip = "\(name) 正在生成，已用 \(secs) 秒"
-        return "\(secs)"
+        button.setAccessibilityLabel(button.toolTip)
     }
 
     func menuWillOpen(_ menu: NSMenu) {
+        installedSources = detectInstalledTools()
         refresh()
+        rebuildMenu(menu)
+    }
+
+    private func rebuildMenu(_ menu: NSMenu) {
         menu.removeAllItems()
         menu.autoenablesItems = false
         summaryItems.removeAll()
-        let panelHeader = header("Token 速度 · tok/s")
+        let panelHeader = header(L10n.text("Token speed") + " · tok/s")
         panelHeader.view = PanelHeaderView(frame: .zero)
         menu.addItem(panelHeader)
-        for source in [SourceMode.codex, .opencode, .claude, .antigravity] {
+        if toolOrder.isEmpty { menu.addItem(header(L10n.text("No tools installed"))) }
+        for source in toolOrder {
             let item = section(source.label, symbol: source.symbol, highlight: false)
             item.view = SummaryMenuView(source: source)
             summaryItems[source] = item
@@ -1161,21 +1260,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateSummaryItems()
         menu.addItem(.separator())
 
-        let sourceItem = NSMenuItem(title: "菜单栏显示", action: nil, keyEquivalent: "")
-        let sourceMenu = NSMenu(title: "菜单栏显示")
-        sourceMenu.autoenablesItems = false
-        for candidate in [SourceMode.auto, .codex, .opencode, .claude, .antigravity] {
-            let item = NSMenuItem(title: candidate.label, action: #selector(setSource(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = candidate.rawValue
-            item.image = ProviderLogo.image(candidate)
-            item.state = (candidate == mode) ? .on : .off
-            sourceMenu.addItem(item)
-        }
-        sourceItem.submenu = sourceMenu
-        menu.addItem(sourceItem)
+        let settings = NSMenuItem(title: L10n.text("Settings") + "…", action: #selector(showSettings(_:)), keyEquivalent: ",")
+        settings.target = self
+        menu.addItem(settings)
 
-        menu.addItem(NSMenuItem(title: "退出 TokSpeed", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        menu.addItem(.separator())
+        let quit = NSMenuItem(title: L10n.text("Quit"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quit.target = NSApp
+        menu.addItem(quit)
+    }
+
+    private func prepareSettings() -> SettingsWindowController {
+        if let controller = settingsController {
+            controller.update(settingsState)
+            return controller
+        }
+        let controller = SettingsWindowController()
+        controller.onSource = { [weak self] source in
+            self?.mode = source
+            self?.settingsChanged()
+        }
+        controller.onDisplay = { [weak self] display in
+            self?.display = display
+            self?.settingsChanged()
+        }
+        controller.onMove = { [weak self] source, offset in self?.moveTool(source, by: offset) }
+        controller.onReset = { [weak self] in
+            self?.defaults.removeObject(forKey: "toolOrder")
+            self?.settingsChanged()
+        }
+        settingsController = controller
+        controller.update(settingsState)
+        return controller
+    }
+
+    @objc private func showSettings(_ sender: Any?) {
+        installedSources = detectInstalledTools()
+        let controller = prepareSettings()
+        NSApp.activate(ignoringOtherApps: true)
+        controller.showWindow(sender)
+        controller.window?.makeKeyAndOrderFront(sender)
+    }
+
+    private func settingsChanged() {
+        updateTitle()
+        settingsController?.update(settingsState)
+    }
+
+    private func moveTool(_ source: SourceMode, by offset: Int) {
+        let order = ToolOrder.moving(source, by: offset, in: toolOrder)
+        var visible = order.makeIterator()
+        let saved = savedToolOrder.map { installedSources.contains($0) ? visible.next()! : $0 }
+        defaults.set(saved.map(\.rawValue), forKey: "toolOrder")
+        settingsChanged()
     }
 
     private func updateSummaryItems() {
@@ -1187,25 +1324,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item.title = "\(summary.name) · \(summary.caption()) · \(summary.value) tok/s"
             (item.view as? SummaryMenuView)?.update(summary)
         }
-        let cumulative = "本轮：已完成调用的输出 token ÷ 调用耗时之和，不含工具执行；非逐 token 瞬时速度。"
+        let cumulative = L10n.text("This turn: output tokens / total completed-call duration, excluding tool execution; not instantaneous per-token speed.")
         update(.codex, active: isCodexGenerating, live: reader.liveTPS(), last: reader.samples.last?.effectiveTPS,
             completed: reader.samples.last?.completedAt, history: reader.samples.map(\.effectiveTPS), model: reader.model, measurement: cumulative)
         update(.opencode, active: isOpenCodeGenerating, live: oc.liveTPS(), last: oc.samples.last?.effectiveTPS,
             completed: oc.samples.last?.completedAt, history: oc.samples.map(\.effectiveTPS), model: oc.samples.last?.model ?? "", measurement: cumulative)
         update(.claude, active: claude.inFlightStart != nil, live: claude.liveTPS(), last: claude.samples.last?.effectiveTPS,
-            completed: claude.samples.last?.completedAt, history: claude.samples.map(\.effectiveTPS), model: claude.samples.last?.model ?? "", measurement: cumulative + "\nClaude 按请求开始到首个完整输出块计时，含首字延迟。")
+            completed: claude.samples.last?.completedAt, history: claude.samples.map(\.effectiveTPS), model: claude.samples.last?.model ?? "", measurement: cumulative + "\n" + L10n.text("Claude measures from request start to the first complete output block, including time to first token."))
         update(.antigravity, active: antigravity.inFlightStart != nil, live: nil,
             last: antigravity.available ? antigravity.samples.last?.effectiveTPS : nil,
             completed: antigravity.samples.last?.completedAt,
             history: antigravity.available ? antigravity.samples.map(\.effectiveTPS) : [],
             model: antigravity.samples.last?.model ?? "",
-            measurement: "上次调用：输出 token ÷（首 token 延迟 + 流式生成时长）；调用完成后更新。")
-    }
-
-    @objc private func setSource(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String, let next = SourceMode(rawValue: raw) else { return }
-        mode = next
-        refresh()
+            measurement: L10n.text("Last call: output tokens / (time to first token + streaming duration); updated after completion."))
     }
 
     private func section(_ title: String, symbol: String, highlight: Bool) -> NSMenuItem {
@@ -1215,7 +1346,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             image.isTemplate = true
             item.image = image
         }
-        if highlight { item.title = "▸ \(title)（菜单栏显示中）" }
+        if highlight { item.title = "▸ \(title)" }
         return item
     }
 
@@ -1225,10 +1356,118 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return item
     }
 
-    private func row(_ key: String, _ value: String) -> NSMenuItem {
-        let item = NSMenuItem(title: "\(key)：\(value)", action: nil, keyEquivalent: "")
-        item.isEnabled = false
-        return item
+    // Exercise real menu actions using an isolated defaults suite, never source logs.
+    func testMenuPreferences() {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        defer { NSStatusBar.system.removeStatusItem(statusItem) }
+        let menu = NSMenu()
+        func openMenu() { rebuildMenu(menu) }
+        func verifyQuitPlacement() {
+            let quit = menu.items.last!
+            precondition(quit.action == #selector(NSApplication.terminate(_:)) && quit.submenu == nil)
+            precondition(quit.target === NSApp && quit.keyEquivalent == "q")
+            precondition(menu.items[menu.items.count - 2].isSeparatorItem)
+            func containsQuit(_ submenu: NSMenu) -> Bool {
+                submenu.items.contains { $0.action == #selector(NSApplication.terminate(_:)) || ($0.submenu.map(containsQuit) ?? false) }
+            }
+            precondition(!menu.items.compactMap(\.submenu).contains(where: containsQuit), "Quit must only appear as the last top-level item")
+        }
+        func send(_ control: NSControl) {
+            precondition(NSApp.sendAction(control.action!, to: control.target, from: control))
+        }
+        openMenu()
+        verifyQuitPlacement()
+        precondition(menu.items.last?.title == L10n.text("Quit"))
+        precondition(menu.items.allSatisfy { $0.submenu == nil })
+        let settings = menu.items.first { $0.action == #selector(showSettings(_:)) }!
+        precondition(settings.title == L10n.text("Settings") + "…" && settings.keyEquivalent == ",")
+        precondition(NSApp.sendAction(settings.action!, to: settings.target, from: settings))
+        let controller = settingsController!
+        precondition(controller.window?.isVisible == true)
+        let closeEvent = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command,
+            timestamp: 0, windowNumber: controller.window!.windowNumber, context: nil,
+            characters: "w", charactersIgnoringModifiers: "w", isARepeat: false, keyCode: 13)!
+        precondition(controller.window!.performKeyEquivalent(with: closeEvent))
+        precondition(controller.window?.isVisible == false, "Command-W closes Settings, not the app")
+        precondition(NSApp.sendAction(settings.action!, to: settings.target, from: settings))
+        precondition(settingsController === controller && controller.window?.isVisible == true, "Reuse the settings window")
+        defer { controller.window?.close() }
+        precondition(Array(menu.items[1...4]).map(\.title) == toolOrder.map {
+            "\($0.label) · \(L10n.text("No data")) · — tok/s"
+        })
+        precondition(display == .speedAndUnit)
+        controller.displayPopup.selectItem(at: 2)
+        send(controller.displayPopup)
+        precondition(display == .iconOnly)
+        precondition(statusItem.button?.title == "" && currentSymbol == "bolt.fill")
+        controller.sourcePopup.selectItem(at: ([SourceMode.auto] + toolOrder).firstIndex(of: .opencode)!)
+        send(controller.sourcePopup)
+        precondition(mode == .opencode)
+        precondition(!controller.upButton.isEnabled)
+        controller.table.selectRowIndexes(IndexSet(integer: toolOrder.count - 1), byExtendingSelection: false)
+        precondition(!controller.downButton.isEnabled)
+        controller.table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+        send(controller.upButton)
+        precondition(toolOrder == [.codex, .claude, .opencode, .antigravity])
+        precondition(controller.table.selectedRow == 0, "Selection follows a moved tool")
+        let restored = AppDelegate(defaults: defaults, detectInstalledTools: { Set(ToolOrder.popular) })
+        precondition(restored.toolOrder == toolOrder && restored.mode == mode && restored.display == display)
+        precondition(controller.resetButton.isEnabled && controller.displayPopup.indexOfSelectedItem == 2)
+        send(controller.resetButton)
+        openMenu()
+        precondition(toolOrder == ToolOrder.popular && !controller.resetButton.isEnabled)
+        for (index, choice) in StatusDisplay.allCases.enumerated() {
+            controller.displayPopup.selectItem(at: index)
+            send(controller.displayPopup)
+            precondition(currentSymbol == "bolt.fill" && statusItem.button?.title == "", "Idle must always show only lightning")
+            renderStatus(source: .opencode, active: true, speed: 46.1, elapsed: 8)
+            let expected = choice.title(active: true, speed: 46.1, elapsed: 8)
+            precondition(statusItem.button?.attributedTitle.string == (expected.isEmpty ? "" : " " + expected))
+            precondition(currentSymbol == (choice == .iconOnly ? "bolt.fill" : "logo-opencode"))
+            precondition(statusItem.button?.image?.isTemplate == true)
+            renderStatus(source: .opencode, active: true, speed: nil, elapsed: 8)
+            let waiting = choice.title(active: true, speed: nil, elapsed: 8)
+            precondition(statusItem.button?.attributedTitle.string == (waiting.isEmpty ? "" : " " + waiting))
+            renderStatus(source: .opencode, active: false, speed: nil, elapsed: 0)
+            precondition(statusItem.button?.title == "" && currentSymbol == "bolt.fill")
+        }
+        print("settings smoke: passed (native window/reopen/source/display/reorder/reset/persistence/status modes/top-level quit)")
+    }
+
+    func testInstalledVisibility(setInstalled: (Set<SourceMode>) -> Void) {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        defer { NSStatusBar.system.removeStatusItem(statusItem) }
+        let menu = NSMenu()
+        mode = .claude
+        defaults.set(["opencode", "claude", "codex", "antigravity"], forKey: "toolOrder")
+        for available: Set<SourceMode> in [[.codex, .opencode], [.claude], []] {
+            setInstalled(available)
+            installedSources = detectInstalledTools()
+            rebuildMenu(menu)
+            updateTitle()
+            precondition(Set(summaryItems.keys) == available)
+            let controller = prepareSettings()
+            let choices = controller.sourcePopup.itemArray.compactMap { ($0.representedObject as? String).flatMap(SourceMode.init(rawValue:)) }
+            precondition(choices == [.auto] + toolOrder)
+            precondition(controller.sourcePopup.selectedItem?.representedObject as? String == effectiveMode.rawValue)
+            precondition(controller.table.numberOfRows == available.count)
+            precondition(mode == .claude, "Temporarily missing apps must not erase a pinned preference")
+            if available.isEmpty {
+                precondition(activeSource == .auto && currentSymbol == "bolt.fill" && statusItem.button?.title == "")
+                precondition(menu.items.contains { $0.title == L10n.text("No tools installed") })
+                precondition(!controller.upButton.isEnabled && !controller.downButton.isEnabled)
+            } else {
+                precondition(available.contains(activeSource))
+            }
+        }
+        setInstalled([.codex, .opencode])
+        installedSources = detectInstalledTools()
+        moveTool(.codex, by: -1)
+        precondition(savedToolOrder == [.codex, .claude, .opencode, .antigravity], "Hidden tools retain their saved positions")
+        setInstalled(Set(ToolOrder.popular))
+        installedSources = detectInstalledTools()
+        precondition(effectiveMode == .claude && toolOrder == savedToolOrder)
+        print("installation menu tests: passed (partial/all/none, hidden choices, pin fallback, restored order)")
     }
 
 }
@@ -1331,6 +1570,8 @@ func testRolloutIncrementalRead() throws {
 
 func testPanel(previewDirectory: String?) throws {
     try testRolloutIncrementalRead()
+    try testInstalledTools()
+    testPresentationPreferences()
     if Bundle.main.bundleURL.pathExtension == "app" {
         precondition(Bundle.main.object(forInfoDictionaryKey: "CFBundleIconFile") as? String == "AppIcon")
         let icon = Bundle.main.url(forResource: "AppIcon", withExtension: "icns").flatMap { NSImage(contentsOf: $0) }
@@ -1347,12 +1588,12 @@ func testPanel(previewDirectory: String?) throws {
     for source in [SourceMode.codex, .opencode, .claude, .antigravity] {
         precondition(ProviderLogo.image(source)?.isTemplate == true, "Missing template logo: \(source.rawValue)")
     }
-    precondition(summary().caption(now: now) == "本轮")
+    precondition(summary().caption(now: now) == L10n.text("This turn"))
     precondition(summary(active: false).value == "31.7")
-    precondition(summary(live: nil).caption(now: now) == "上次 · 8 秒前")
+    precondition(summary(live: nil).caption(now: now) == L10n.text("Last · %@", L10n.text("%d s ago", 8)))
     precondition(summary(live: nil, last: nil).value == "—")
-    precondition(summary(live: nil, last: nil).caption(now: now) == "等待数据")
-    precondition(summary(active: false, live: nil, last: nil).caption(now: now) == "暂无数据")
+    precondition(summary(live: nil, last: nil).caption(now: now) == L10n.text("Waiting for data"))
+    precondition(summary(active: false, live: nil, last: nil).caption(now: now) == L10n.text("No data"))
     precondition(summary(live: .nan, last: .infinity).value == "—")
     precondition(summary(history: Array(1...20).map(Double.init) + [.nan, .infinity, 0, -1]).recent == Array(9...20).map(Double.init))
     for (appearance, expected) in [(NSAppearance.Name.darkAqua, 1.0), (.aqua, 0.0)] {
@@ -1366,43 +1607,177 @@ func testPanel(previewDirectory: String?) throws {
 
     guard let directory = previewDirectory else { return }
     try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+    func capture(_ view: NSView, name: String) throws {
+        view.layoutSubtreeIfNeeded()
+        view.display()
+        guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw NSError(domain: "PanelPreview", code: 1) }
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        guard let png = bitmap.representation(using: .png, properties: [:]) else { throw NSError(domain: "PanelPreview", code: 2) }
+        let path = (directory as NSString).appendingPathComponent(name)
+        try png.write(to: URL(fileURLWithPath: path))
+        print("preview: \(path)")
+    }
     for dark in [true, false] {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 322), styleMask: [.borderless], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 332), styleMask: [.borderless], backing: .buffered, defer: false)
         window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         let root = window.contentView!
         root.wantsLayer = true
         root.layer?.backgroundColor = NSColor(white: dark ? 0.13 : 0.96, alpha: 1).cgColor
         let header = PanelHeaderView(frame: .zero)
-        header.frame.origin.y = 288
+        header.frame.origin.y = 298
         root.addSubview(header)
         let examples: [(SourceMode, Bool, Double?, Double?, [Double])] = [
-            (.codex, true, 46.1, 31.7, [22, 28, 24, 40, 32, 39, 51, 36, 42, 35, 49, 46]),
             (.claude, true, 113, 99, [65, 80, 75, 110, 98, 125, 104, 115, 106, 131, 120, 113]),
+            (.codex, true, 46.1, 31.7, [22, 28, 24, 40, 32, 39, 51, 36, 42, 35, 49, 46]),
             (.opencode, false, nil, 16.2, [8, 14, 11, 13, 19, 15, 20, 16, 14, 18, 17, 16.2]),
             (.antigravity, true, nil, 30.8, [22, 28, 31, 20, 34, 24, 29, 32, 26, 33, 29, 30.8])
         ]
         for (index, entry) in examples.enumerated() {
             let (source, active, live, last, history) = entry
             let view = SummaryMenuView(source: source)
-            view.frame.origin.y = 232 - CGFloat(index) * 56
+            view.frame.origin.y = 242 - CGFloat(index) * 56
             view.update(SpeedSummary(name: source.label, active: active, live: live, last: last,
                 completedAt: now.addingTimeInterval(-8), history: history, model: "test", measurement: "test"))
             root.addSubview(view)
         }
-        for (index, title) in ["菜单栏显示                                      ›", "退出 TokSpeed"].enumerated() {
+        for (index, title) in [L10n.text("Settings") + "…", L10n.text("Quit")].enumerated() {
             let label = NSTextField(labelWithString: title)
-            label.frame = NSRect(x: 16, y: 34 - index * 24, width: 328, height: 20)
+            let y = index == 0 ? 44 : 10
+            label.frame = NSRect(x: 16, y: y, width: 328, height: 20)
             label.font = .systemFont(ofSize: 13)
             root.addSubview(label)
         }
-        root.display()
-        guard let bitmap = root.bitmapImageRepForCachingDisplay(in: root.bounds) else { throw NSError(domain: "PanelPreview", code: 1) }
-        root.cacheDisplay(in: root.bounds, to: bitmap)
-        guard let png = bitmap.representation(using: .png, properties: [:]) else { throw NSError(domain: "PanelPreview", code: 2) }
-        let path = (directory as NSString).appendingPathComponent(dark ? "panel-dark.png" : "panel-light.png")
-        try png.write(to: URL(fileURLWithPath: path))
-        print("preview: \(path)")
+        let separator = NSBox(frame: NSRect(x: 16, y: 36, width: 328, height: 1))
+        separator.boxType = .separator
+        root.addSubview(separator)
+        try capture(root, name: dark ? "panel-dark.png" : "panel-light.png")
+        let settings = SettingsWindowController()
+        settings.window?.appearance = window.appearance
+        settings.update(SettingsState(sources: ToolOrder.popular, source: .auto, display: .speedAndUnit, customOrder: false))
+        try capture(settings.window!.contentView!.superview!, name: dark ? "settings-dark.png" : "settings-light.png")
     }
+}
+
+func testPresentationPreferences() {
+    for (preferences, expected) in [
+        (["en-GB"], "en"), (["zh-CN"], "zh-Hans"), (["zh-SG"], "zh-Hans"),
+        (["zh-TW"], "zh-Hant"), (["zh-HK"], "zh-Hant"), (["zh-Hans-TW"], "zh-Hans"),
+        (["ja-JP"], "ja"), (["ko-KR"], "ko"), (["de-DE"], "de"),
+        (["fr-CA"], "fr"), (["es-MX"], "es"), (["it-IT"], "en"),
+        (["it-IT", "de-DE"], "de"), ([], "en")
+    ] {
+        precondition(L10n.resolve(preferences) == expected)
+    }
+    let english = L10n.table("en")
+    precondition(!english.isEmpty)
+    let placeholders = try! NSRegularExpression(pattern: "%[@d]")
+    func formats(_ text: String) -> [String] {
+        placeholders.matches(in: text, range: NSRange(text.startIndex..., in: text)).map {
+            (text as NSString).substring(with: $0.range)
+        }
+    }
+    for language in L10n.languages {
+        let table = L10n.table(language)
+        precondition(Set(table.keys) == Set(english.keys), "Incomplete localization: \(language)")
+        for (key, value) in table {
+            precondition(!value.isEmpty && formats(key) == formats(value), "Invalid translation: \(language) \(key)")
+        }
+    }
+    precondition(L10n.text("Missing translation falls back to English") == "Missing translation falls back to English")
+    print("localization tests: passed (8 languages, matching/fallback/completeness/format arguments); selected=\(L10n.language)")
+
+    precondition(ToolOrder.normalized([]) == ToolOrder.popular)
+    precondition(ToolOrder.normalized(["auto", "unknown", "opencode", "opencode"]) == [.opencode, .claude, .codex, .antigravity])
+    precondition(ToolOrder.moving(.claude, by: -1, in: ToolOrder.popular) == ToolOrder.popular)
+    precondition(ToolOrder.moving(.antigravity, by: 1, in: ToolOrder.popular) == ToolOrder.popular)
+    for active in [false, true] {
+        for display in StatusDisplay.allCases {
+            let hidden = !active || display == .iconOnly
+            precondition(display.usesLightning(active: active) == hidden)
+            precondition(display.title(active: active, speed: 46.1, elapsed: 8) == (hidden ? "" : display == .speedAndUnit ? "46.1 tok/s" : "46.1"))
+            precondition(display.title(active: active, speed: nil, elapsed: 8) == (hidden ? "" : display == .speedAndUnit ? "8 s" : "8"))
+        }
+    }
+    let now = Date()
+    precondition(AppDelegate.preferredSource(mode: .auto, activity: [(.codex, true, now.addingTimeInterval(-30)), (.opencode, false, now)]) == .codex)
+    precondition(AppDelegate.preferredSource(mode: .auto, activity: [(.codex, false, now.addingTimeInterval(-30)), (.opencode, false, now)]) == .opencode)
+    precondition(AppDelegate.preferredSource(mode: .claude, activity: [(.codex, true, now)]) == .claude)
+
+    for values: [Double] in [[], [12], [12, 24], [0, 100, 0, 100, 1], [50, 50, 50], [1, 2, 4, 100]] {
+        let points = values.enumerated().map { NSPoint(x: Double($0.offset) * 10, y: $0.element) }
+        let path = SparklineView.smoothPath(points)
+        precondition(path.elementCount == points.count)
+        var previous = points.first ?? .zero
+        for index in 1..<max(1, path.elementCount) {
+            var controls = [NSPoint](repeating: .zero, count: 3)
+            precondition(path.element(at: index, associatedPoints: &controls) == .curveTo)
+            let start = previous, end = controls[2]
+            for step in 0...100 {
+                let t = Double(step) / 100, u = 1 - t
+                let y = u*u*u*start.y + 3*u*u*t*controls[0].y + 3*u*t*t*controls[1].y + t*t*t*end.y
+                precondition(y >= min(start.y, end.y) - 0.0001 && y <= max(start.y, end.y) + 0.0001, "Smooth curves must not overshoot")
+            }
+            previous = end
+        }
+    }
+    print("presentation tests: passed (ordering/status modes/active-source priority/smooth curves without overshoot)")
+
+    let suite = "io.github.thinkofuture.tokspeed.test.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    var installed = Set(ToolOrder.popular)
+    let delegate = AppDelegate(defaults: defaults, detectInstalledTools: { installed })
+    withExtendedLifetime(delegate) {
+        delegate.testMenuPreferences()
+        delegate.testInstalledVisibility { installed = $0 }
+    }
+}
+
+func testInstalledTools() throws {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("tokspeed-installs-\(UUID().uuidString)")
+    try fm.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: root) }
+    func write(_ relative: String, executable: Bool = false) throws {
+        let url = root.appendingPathComponent(relative)
+        try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("fixture, never executed".utf8).write(to: url)
+        if executable { try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path) }
+    }
+    func detect(path: String = "", app: URL? = nil) -> Set<SourceMode> {
+        InstalledTools.detect(environment: ["PATH": path], home: root.path,
+            systemBinDirectories: [], applicationDirectories: [root.appendingPathComponent("Applications").path],
+            applicationURL: { _ in app })
+    }
+    try write(".codex/sessions/rollout-old.jsonl")
+    try write(".claude/projects/old.jsonl")
+    try write(".local/share/opencode/opencode.db")
+    try write(".gemini/antigravity/conversation_summaries.db")
+    precondition(detect().isEmpty, "Leftover data is not an installation")
+    try write(".local/bin/codex", executable: true)
+    try write(".opencode/bin/opencode", executable: true)
+    try write(".nvm/versions/node/v22/bin/claude", executable: true)
+    try write("custom/bin/antigravity")
+    let path = root.appendingPathComponent("custom/bin").path
+    precondition(detect(path: path) == [.codex, .opencode, .claude], "A non-executable file is not a CLI")
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.appendingPathComponent("custom/bin/antigravity").path)
+    precondition(detect(path: path) == Set(ToolOrder.popular))
+    let app = root.appendingPathComponent("Applications/Antigravity.app")
+    try write("Applications/Antigravity.app/Contents/MacOS/Antigravity", executable: true)
+    let info: [String: String] = ["CFBundleExecutable": "Antigravity", "CFBundleIdentifier": "com.google.antigravity", "CFBundlePackageType": "APPL"]
+    try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+        .write(to: app.appendingPathComponent("Contents/Info.plist"))
+    precondition(detect() == Set(ToolOrder.popular), "Desktop-only installs must be visible")
+    let moved = root.appendingPathComponent("Elsewhere/Antigravity.app")
+    try fm.createDirectory(at: moved.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try fm.moveItem(at: app, to: moved)
+    precondition(!detect().contains(.antigravity))
+    precondition(detect(app: moved).contains(.antigravity), "Launch Services can locate nonstandard app installs")
+    let trashed = root.appendingPathComponent(".Trash/Antigravity.app")
+    try fm.createDirectory(at: trashed.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try fm.moveItem(at: moved, to: trashed)
+    precondition(!detect(app: trashed).contains(.antigravity))
+    print("installation detection tests: passed (CLI/PATH/Finder/NVM/desktop/Launch Services/trash/stale logs)")
 }
 
 let args = CommandLine.arguments

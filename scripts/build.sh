@@ -34,10 +34,14 @@ xcrun swiftc -swift-version 5 -O \
     -target "$(uname -m)-apple-macosx13.0" \
     -module-cache-path "$BUILD_DIR/ModuleCache" \
     -framework AppKit -lsqlite3 \
-    main.swift -o "$APP/Contents/MacOS/TokSpeed"
+    main.swift Localization.swift InstalledTools.swift SettingsWindow.swift -o "$APP/Contents/MacOS/TokSpeed"
 
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/Logos/*.svg Resources/Logos/NOTICE.md "$RESOURCES/Logos/"
+for localization in Resources/*.lproj; do
+    mkdir -p "$RESOURCES/$(basename "$localization")"
+    cp "$localization/Localizable.strings" "$RESOURCES/$(basename "$localization")/"
+done
 cp LICENSE "$RESOURCES/LICENSE"
 plutil -lint "$APP/Contents/Info.plist"
 

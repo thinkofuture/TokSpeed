@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <strong>English</strong> · <a href="README.zh-CN.md">简体中文</a>
+  <strong>English</strong> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ko.md">한국어</a> · <a href="README.de.md">Deutsch</a> · <a href="README.fr.md">Français</a> · <a href="README.es.md">Español</a>
 </p>
 
 ---
@@ -33,9 +33,14 @@ bash scripts/build.sh
 open build/TokSpeed.app
 ```
 
-The app appears only in the menu bar, not in the Dock. Click its icon to see each source, choose the source shown in the menu bar, or quit. Sources without records show a no-data state. **The app interface is currently in Simplified Chinese; the language links above switch the documentation only.**
+The app appears only in the menu bar, not in the Dock. Click its icon to see each source, choose the source shown in the menu bar, or quit. Uninstalled tools are hidden from summaries, source choices, and custom ordering. Installed tools without records show a no-data state. The interface automatically follows your system's preferred languages: English, Simplified/Traditional Chinese, Japanese, Korean, German, French, and Spanish, with English as the fallback. Restart the app after changing the system language.
 
-You can drag `build/TokSpeed.app` to your Applications folder. To uninstall, quit and delete the app. The source preference is stored in macOS UserDefaults; after quitting, you can clear it with `defaults delete io.github.thinkofuture.tokspeed`.
+- **Settings…** opens a native macOS window. Changes save immediately. **Quit** stays in the menu, not in Settings.
+- **Source / Display**: choose **Automatic** or pin a tool; show **Number and unit**, **Number only**, or **Icon only**. While waiting, numbers are elapsed seconds (`s`), not speed (`tok/s`). Idle always shows a lightning icon.
+- **Tool order**: select a tool, then use ↑ / ↓. **Reset** restores Claude Code → Codex → OpenCode → Antigravity, a static popularity-oriented order, not measured user counts.
+- Trend charts use smooth curves without overshooting the recorded values.
+
+You can drag `build/TokSpeed.app` to your Applications folder. To uninstall, quit and delete the app. Source, display, and tool-order preferences are stored in macOS UserDefaults; after quitting, you can clear them with `defaults delete io.github.thinkofuture.tokspeed`.
 
 TokSpeed is currently distributed as source code. The build script applies local ad-hoc signing only, without Developer ID signing or Apple notarization. It generates the macOS app icon from the checked-in `Resources/AppIcon.png` using system tools.
 
@@ -48,9 +53,9 @@ TokSpeed is currently distributed as source code. The build script applies local
 | Claude Code | JSONL files in `~/.claude/projects/`, excluding subagent records; respects `CLAUDE_CONFIG_DIR` |
 | Antigravity | `~/.gemini/antigravity/conversation_summaries.db` and `conversations/*.db` |
 
-- You do not need to install every supported tool. Each reader selects recent records independently of the foreground window.
+- You do not need to install every supported tool. Desktop apps and executable CLIs on `PATH` or common installation paths are detected locally; leftover logs alone do not count as an installation. Detection refreshes automatically, and a missing pinned source temporarily falls back to automatic selection without erasing your preference. Each installed source selects recent records independently of the foreground window.
 - Local logs may contain conversation content. TokSpeed reads those files and parses the fields needed for statistics; it does not upload data, initiate network requests, or modify source logs or databases. SQLite databases are opened read-only.
-- TokSpeed saves only the menu bar source preference, not separate copies of chats. Command line diagnostics may print session IDs and local paths; redact them before sharing output.
+- TokSpeed saves only source, display, and tool-order preferences, not separate copies of chats. Command line diagnostics may print session IDs and local paths; redact them before sharing output.
 - Apps launched from Finder generally do not inherit your terminal's environment variables. For custom directories, set the relevant variables and launch the executable inside the app directly from your terminal.
 
 ## Measurements & Limitations
@@ -65,11 +70,13 @@ Speeds are estimates based on local records: **not instantaneous per-token measu
 
 ## Basic Checks
 
-After building, check panel states, light/dark colors, the app and provider icons, and the Codex partial-write regression without reading real conversations:
+After building, check panel states, light/dark colors, icons, all eight localization tables, language fallback, smooth curves, display modes, menu actions, installation detection/filtering, preference persistence, and the Codex partial-write regression without reading real conversations or changing app preferences:
 
 ```sh
 build/TokSpeed.app/Contents/MacOS/TokSpeed --test-panel
 ```
+
+To verify a specific system-language selection, append e.g. `-AppleLanguages '("ja-JP")'`. Add `--preview-directory <directory>` to save light/dark panel previews.
 
 ## License
 

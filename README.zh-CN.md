@@ -5,11 +5,11 @@
 <h1 align="center">TokSpeed</h1>
 
 <p align="center">
-  <strong>在菜单栏，一眼看见 AI 的输出节奏。</strong>
+  <strong>在菜单栏检查 AI 有没有偷懒</strong>
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · <strong>简体中文</strong>
+  <a href="README.md">English</a> · <strong>简体中文</strong> · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ko.md">한국어</a> · <a href="README.de.md">Deutsch</a> · <a href="README.fr.md">Français</a> · <a href="README.es.md">Español</a>
 </p>
 
 ---
@@ -33,9 +33,14 @@ bash scripts/build.sh
 open build/TokSpeed.app
 ```
 
-应用仅显示在菜单栏，不显示 Dock 图标。点击图标查看各来源数据、切换菜单栏显示来源或退出；未检测到记录时显示“暂无数据”。**应用界面目前为简体中文；顶部语言链接仅切换文档。**
+应用仅显示在菜单栏，不显示 Dock 图标。点击图标查看各来源数据、切换菜单栏显示来源或退出。未安装的工具不会出现在概览、来源选择和自定义排序中；已安装但没有记录的工具显示“暂无数据”。界面自动匹配系统首选语言，支持英语、简繁中文、日语、韩语、德语、法语和西班牙语，未支持的语言以英语兜底。修改系统语言后请重新启动应用。
 
-可将 `build/TokSpeed.app` 拖到“应用程序”文件夹，退出后删除应用即可卸载。菜单栏来源偏好保存在 macOS UserDefaults；退出后可用 `defaults delete io.github.thinkofuture.tokspeed` 清除。
+- **设置…**：打开原生 macOS 窗口，修改即时保存。**退出**独立放在菜单最后。
+- **来源 / 显示**：选择“自动”或固定工具；支持“数字与单位”“仅数字”“仅图标”。等待时数字表示经过秒数（`s`），非速度（`tok/s`）；空闲时只显示闪电。
+- **工具排序**：选中工具后用 ↑ / ↓ 调整；“重置”恢复 Claude Code → Codex → OpenCode → Antigravity。默认采用静态人气顺序，非实时用户量统计。
+- 趋势图使用平滑曲线，不超出相邻样本的数值范围。
+
+可将 `build/TokSpeed.app` 拖到“应用程序”文件夹，退出后删除应用即可卸载。来源、显示模式和工具排序偏好保存在 macOS UserDefaults；退出后可用 `defaults delete io.github.thinkofuture.tokspeed` 清除。
 
 当前以源码方式提供。构建脚本只做本机 ad-hoc 签名，不包含 Developer ID 签名或 Apple 公证；使用系统工具从仓库中的 `Resources/AppIcon.png` 生成 macOS 应用图标。
 
@@ -48,9 +53,9 @@ open build/TokSpeed.app
 | Claude Code | `~/.claude/projects/` 中的 JSONL，跳过子代理记录；支持 `CLAUDE_CONFIG_DIR` |
 | Antigravity | `~/.gemini/antigravity/conversation_summaries.db` 和 `conversations/*.db` |
 
-- 不要求同时安装所有工具；各来源自动选取最近记录，不绑定当前前台窗口。
+- 不要求同时安装所有工具。本地检测桌面应用，以及 `PATH` 和常见安装目录中的可执行 CLI；仅残留日志不算已安装。检测会自动刷新，固定来源暂时不可用时自动回退，但保留原偏好。各已安装来源自动选取最近记录，不绑定当前前台窗口。
 - 本地日志可能含有对话内容；应用会读取日志文件并解析统计需要的字段，不上传数据，不主动发起网络请求，也不修改源日志或数据库。SQLite 以只读模式打开。
-- 应用只保存菜单栏来源偏好，不另存聊天记录。命令行诊断可能输出会话 ID 和本地路径，分享输出前请脱敏。
+- 应用只保存来源、显示模式和工具排序偏好，不另存聊天记录。命令行诊断可能输出会话 ID 和本地路径，分享输出前请脱敏。
 - 从 Finder 启动通常不会继承终端环境变量；使用自定义目录时，可从终端直接运行应用中的可执行文件并设置相应变量。
 
 ## 速度统计与限制
@@ -65,11 +70,13 @@ open build/TokSpeed.app
 
 ## 基本检查
 
-构建后可检查面板状态、明暗配色、应用与工具图标及 Codex 分段写入回归用例，无需读取真实会话：
+构建后可检查面板状态、明暗配色、图标、八种语言翻译与兜底、平滑曲线、显示模式、菜单操作、安装检测与过滤、偏好持久化及 Codex 分段写入回归用例，无需读取真实会话或修改应用偏好：
 
 ```sh
 build/TokSpeed.app/Contents/MacOS/TokSpeed --test-panel
 ```
+
+可追加 `-AppleLanguages '("ja-JP")'` 验证特定系统语言；追加 `--preview-directory <目录>` 保存明暗面板预览图。
 
 ## 许可证
 
