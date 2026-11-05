@@ -1098,6 +1098,91 @@ final class SummaryMenuView: NSView {
     }
 }
 
+final class PanelActionButton: NSButton {
+    private let titleLabel: NSTextField
+    private let shortcutLabel: NSTextField
+    private var hoverTracking: NSTrackingArea?
+    private var hovered = false
+    override var allowsVibrancy: Bool { false }
+
+    init(title: String, shortcut: String) {
+        titleLabel = NSTextField(labelWithString: title)
+        shortcutLabel = NSTextField(labelWithString: shortcut)
+        super.init(frame: NSRect(x: 0, y: 0, width: 360, height: 28))
+        isBordered = false
+        imagePosition = .noImage
+        setButtonType(.momentaryChange)
+        autoresizingMask = [.width]
+        titleLabel.frame = NSRect(x: 16, y: 5, width: 250, height: 18)
+        titleLabel.font = .systemFont(ofSize: 13)
+        titleLabel.lineBreakMode = .byTruncatingTail
+        shortcutLabel.frame = NSRect(x: 280, y: 5, width: 64, height: 18)
+        shortcutLabel.font = .systemFont(ofSize: 13)
+        shortcutLabel.alignment = .right
+        shortcutLabel.autoresizingMask = [.minXMargin]
+        addSubview(titleLabel)
+        addSubview(shortcutLabel)
+        target = self
+        action = #selector(activateItem(_:))
+        setAccessibilityLabel(title)
+        setAccessibilityRole(.menuItem)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { super.hitTest(point) == nil ? nil : self }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTracking { removeTrackingArea(hoverTracking) }
+        let area = NSTrackingArea(rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
+        addTrackingArea(area)
+        hoverTracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovered = true; needsDisplay = true }
+    override func mouseExited(with event: NSEvent) { hovered = false; needsDisplay = true }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        hovered = false
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let highlighted = hovered || isHighlighted
+        if highlighted {
+            NSColor.selectedContentBackgroundColor.setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 5, dy: 1), xRadius: 5, yRadius: 5).fill()
+        }
+        titleLabel.textColor = highlighted ? .alternateSelectedControlTextColor : .labelColor
+        shortcutLabel.textColor = highlighted ? .alternateSelectedControlTextColor : .secondaryLabelColor
+    }
+
+    @objc private func activateItem(_ sender: Any?) {
+        guard let item = enclosingMenuItem, let action = item.action else { return }
+        item.menu?.cancelTracking()
+        NSApp.sendAction(action, to: item.target, from: item)
+    }
+}
+
+final class PanelSeparatorView: NSView {
+    override var allowsVibrancy: Bool { false }
+
+    override init(frame: NSRect) {
+        super.init(frame: NSRect(x: 0, y: 0, width: 360, height: 9))
+        autoresizingMask = [.width]
+        setAccessibilityElement(false)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.labelColor.withAlphaComponent(0.1).setFill()
+        NSRect(x: 16, y: bounds.midY, width: bounds.width - 32, height: 0.5).fill()
+    }
+}
+
 final class PanelHeaderView: NSView {
     override var allowsVibrancy: Bool { false }
     override init(frame: NSRect) {
@@ -1331,15 +1416,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         configureReordering(in: menu)
         updateSummaryItems()
-        menu.addItem(.separator())
+        menu.addItem(panelSeparator())
 
         let settings = NSMenuItem(title: L10n.text("Settings") + "…", action: #selector(showSettings(_:)), keyEquivalent: ",")
         settings.target = self
+        settings.view = PanelActionButton(title: settings.title, shortcut: "⌘,")
         menu.addItem(settings)
 
-        menu.addItem(.separator())
+        menu.addItem(panelSeparator())
         let quit = NSMenuItem(title: L10n.text("Quit"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp
+        quit.view = PanelActionButton(title: quit.title, shortcut: "⌘Q")
         menu.addItem(quit)
     }
 
@@ -1465,6 +1552,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return item
     }
 
+    private func panelSeparator() -> NSMenuItem {
+        // Native separator items ignore custom views and keep the system's stroke.
+        let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        item.view = PanelSeparatorView(frame: .zero)
+        return item
+    }
+
     // Exercise real menu actions using an isolated defaults suite, never source logs.
     func testMenuPreferences() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -1475,7 +1570,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let quit = menu.items.last!
             precondition(quit.action == #selector(NSApplication.terminate(_:)) && quit.submenu == nil)
             precondition(quit.target === NSApp && quit.keyEquivalent == "q")
-            precondition(menu.items[menu.items.count - 2].isSeparatorItem)
+            precondition(menu.items[menu.items.count - 2].view is PanelSeparatorView)
             func containsQuit(_ submenu: NSMenu) -> Bool {
                 submenu.items.contains { $0.action == #selector(NSApplication.terminate(_:)) || ($0.submenu.map(containsQuit) ?? false) }
             }
@@ -1770,14 +1865,12 @@ func testPanel(previewDirectory: String?) throws {
             root.addSubview(view)
         }
         for (index, title) in [L10n.text("Settings") + "…", L10n.text("Quit")].enumerated() {
-            let label = NSTextField(labelWithString: title)
-            let y = index == 0 ? 44 : 10
-            label.frame = NSRect(x: 16, y: y, width: 328, height: 20)
-            label.font = .systemFont(ofSize: 13)
-            root.addSubview(label)
+            let action = PanelActionButton(title: title, shortcut: index == 0 ? "⌘," : "⌘Q")
+            action.frame.origin.y = index == 0 ? 40 : 6
+            root.addSubview(action)
         }
-        let separator = NSBox(frame: NSRect(x: 16, y: 36, width: 328, height: 1))
-        separator.boxType = .separator
+        let separator = PanelSeparatorView(frame: .zero)
+        separator.frame.origin.y = 32
         root.addSubview(separator)
         try capture(root, name: dark ? "panel-dark.png" : "panel-light.png")
         let settings = SettingsWindowController()

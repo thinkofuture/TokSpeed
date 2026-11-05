@@ -47,4 +47,6 @@ plutil -lint "$APP/Contents/Info.plist"
 
 # Local ad-hoc signing only; no developer certificate or notarization is needed.
 codesign --force --sign - --timestamp=none "$APP"
+# Finder displays the bundle directory's timestamp, not the executable's.
+touch "$APP"
 echo "Built: $APP"

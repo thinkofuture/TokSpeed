@@ -110,7 +110,7 @@ enum MenuCardReorder {
         let preview = NSImageView(frame: frame)
         preview.image = image
         preview.imageScaling = .scaleNone
-        preview.alphaValue = 0.95
+        preview.alphaValue = 0.5
         preview.wantsLayer = true
         preview.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
         preview.layer?.cornerRadius = 6
