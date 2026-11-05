@@ -770,10 +770,11 @@ enum ToolOrder {
         return result
     }
 
-    static func moving(_ source: SourceMode, by offset: Int, in order: [SourceMode]) -> [SourceMode] {
-        guard let index = order.firstIndex(of: source), order.indices.contains(index + offset) else { return order }
+    static func moving(_ source: SourceMode, to destination: Int, in order: [SourceMode]) -> [SourceMode] {
+        guard let index = order.firstIndex(of: source), order.indices.contains(destination) else { return order }
         var result = order
-        result.swapAt(index, index + offset)
+        result.remove(at: index)
+        result.insert(source, at: destination)
         return result
     }
 }
@@ -973,9 +974,23 @@ final class SparklineView: NSView {
     }
 }
 
-// Custom, read-only views avoid disabled NSMenu text dimming and keep live
-// values aligned without treating the summaries as clickable commands.
+// Custom views keep live values aligned without treating summaries as commands.
+// Their slots stay fixed while NSMenu tracks; a drop rebinds the sources in place.
 final class SummaryMenuView: NSView {
+    private(set) var source: SourceMode
+    var onDrag: ((SummaryMenuView, NSEvent) -> Void)? {
+        didSet {
+            setAccessibilityHelp(onDrag == nil ? nil : L10n.text("Drag to reorder"))
+            window?.invalidateCursorRects(for: self)
+            needsDisplay = true
+        }
+    }
+    var insertionEdge: MenuCardReorder.Edge? { didSet { needsDisplay = true } }
+    var isDragging = false {
+        didSet { subviews.forEach { $0.alphaValue = isDragging ? 0.35 : 1 }; needsDisplay = true }
+    }
+    private var hovered = false
+    private var hoverTracking: NSTrackingArea?
     private let nameLabel = NSTextField(labelWithString: "")
     private let captionLabel = NSTextField(labelWithString: "")
     private let valueLabel = NSTextField(labelWithString: "—")
@@ -984,8 +999,9 @@ final class SummaryMenuView: NSView {
     override var allowsVibrancy: Bool { false }
 
     init(source: SourceMode) {
+        self.source = source
         super.init(frame: NSRect(x: 0, y: 0, width: 360, height: 56))
-        icon.frame = NSRect(x: 15, y: 26, width: 18, height: 18)
+        icon.frame = NSRect(x: 15, y: 0, width: 18, height: 18)
         icon.image = ProviderLogo.image(source) ?? NSImage(systemSymbolName: source.symbol, accessibilityDescription: nil)
         icon.imageScaling = .scaleProportionallyUpOrDown
         addSubview(icon)
@@ -993,6 +1009,8 @@ final class SummaryMenuView: NSView {
         nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
         captionLabel.frame = NSRect(x: 40, y: 9, width: 126, height: 15)
         captionLabel.font = .systemFont(ofSize: 11)
+        // Align the logo with the whole two-line text block, not just the name.
+        icon.frame.origin.y = nameLabel.frame.union(captionLabel.frame).midY - icon.frame.height / 2
         sparkline.frame = NSRect(x: 174, y: 18, width: 78, height: 24)
         valueLabel.frame = NSRect(x: 260, y: 17, width: 84, height: 24)
         valueLabel.font = .monospacedDigitSystemFont(ofSize: 18, weight: .medium)
@@ -1008,6 +1026,61 @@ final class SummaryMenuView: NSView {
 
     required init?(coder: NSCoder) { nil }
 
+    func bind(_ source: SourceMode) {
+        self.source = source
+        icon.image = ProviderLogo.image(source) ?? NSImage(systemSymbolName: source.symbol, accessibilityDescription: nil)
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        // Labels and the sparkline must behave like the rest of the card.
+        let hit = super.hitTest(point)
+        return onDrag != nil && hit != nil ? self : hit
+    }
+
+    override func mouseDown(with event: NSEvent) { onDrag?(self, event) }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if onDrag != nil { addCursorRect(bounds, cursor: .openHand) }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTracking { removeTrackingArea(hoverTracking) }
+        let area = NSTrackingArea(rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
+        addTrackingArea(area)
+        hoverTracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovered = true; needsDisplay = true }
+    override func mouseExited(with event: NSEvent) { hovered = false; needsDisplay = true }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        hovered = false
+        insertionEdge = nil
+        isDragging = false
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        if hovered && onDrag != nil && !isDragging {
+            NSColor.tertiaryLabelColor.setFill()
+            for x: CGFloat in [4, 8] {
+                for y: CGFloat in [22, 27, 32] {
+                    NSBezierPath(ovalIn: NSRect(x: x, y: y, width: 2, height: 2)).fill()
+                }
+            }
+        }
+        if let edge = insertionEdge {
+            NSColor.controlAccentColor.setFill()
+            let y: CGFloat = edge == .top ? bounds.maxY - 2 : bounds.minY
+            NSBezierPath(roundedRect: NSRect(x: 12, y: y, width: bounds.width - 24, height: 2),
+                xRadius: 1, yRadius: 1).fill()
+        }
+    }
+
     func update(_ summary: SpeedSummary) {
         nameLabel.stringValue = summary.name
         captionLabel.stringValue = summary.caption()
@@ -1019,7 +1092,7 @@ final class SummaryMenuView: NSView {
         icon.contentTintColor = color
         sparkline.color = color
         sparkline.values = summary.recent
-        toolTip = summary.tooltip
+        toolTip = nil
         let state = summary.active ? L10n.text("Active") : L10n.text("Idle")
         setAccessibilityLabel(L10n.text("%@, %@, %@, %@ tokens per second", summary.name, state, summary.caption(), summary.value))
     }
@@ -1062,8 +1135,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var settingsController: SettingsWindowController?
 
     private var settingsState: SettingsState {
-        SettingsState(sources: toolOrder, source: effectiveMode, display: display,
-            customOrder: defaults.stringArray(forKey: "toolOrder") != nil)
+        SettingsState(sources: toolOrder, source: effectiveMode, display: display)
     }
 
     init(defaults: UserDefaults = .standard, detectInstalledTools: @escaping () -> Set<SourceMode> = { InstalledTools.detect() }) {
@@ -1257,6 +1329,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             summaryItems[source] = item
             menu.addItem(item)
         }
+        configureReordering(in: menu)
         updateSummaryItems()
         menu.addItem(.separator())
 
@@ -1284,11 +1357,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.display = display
             self?.settingsChanged()
         }
-        controller.onMove = { [weak self] source, offset in self?.moveTool(source, by: offset) }
-        controller.onReset = { [weak self] in
-            self?.defaults.removeObject(forKey: "toolOrder")
-            self?.settingsChanged()
-        }
         settingsController = controller
         controller.update(settingsState)
         return controller
@@ -1307,12 +1375,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsController?.update(settingsState)
     }
 
-    private func moveTool(_ source: SourceMode, by offset: Int) {
-        let order = ToolOrder.moving(source, by: offset, in: toolOrder)
+    @discardableResult
+    private func moveTool(_ source: SourceMode, to destination: Int, in menu: NSMenu? = nil) -> Bool {
+        let order = ToolOrder.moving(source, to: destination, in: toolOrder)
+        guard order != toolOrder else { return false }
         var visible = order.makeIterator()
         let saved = savedToolOrder.map { installedSources.contains($0) ? visible.next()! : $0 }
         defaults.set(saved.map(\.rawValue), forKey: "toolOrder")
+        if let menu {
+            let items = menu.items.filter { $0.view is SummaryMenuView }
+            // Rebind fixed slots rather than removing/inserting items in an open NSMenu.
+            if items.count == order.count {
+                summaryItems.removeAll()
+                for (item, source) in zip(items, order) {
+                    (item.view as? SummaryMenuView)?.bind(source)
+                    item.title = source.label
+                    summaryItems[source] = item
+                }
+                configureReordering(in: menu)
+                updateSummaryItems()
+            }
+        }
         settingsChanged()
+        return true
+    }
+
+    private func configureReordering(in menu: NSMenu) {
+        let rows = menu.items.compactMap { $0.view as? SummaryMenuView }
+        let sources = rows.map(\.source)
+        for (index, row) in rows.enumerated() {
+            row.onDrag = rows.count > 1 ? { [weak self, weak menu] card, event in
+                guard let self, let menu else { return }
+                let currentRows = menu.items.compactMap { $0.view as? SummaryMenuView }
+                MenuCardReorder.track(card, event: event, rows: currentRows) { destination in
+                    // Installation detection can refresh during tracking. Do not commit a stale list.
+                    guard self.toolOrder == sources else { return }
+                    self.moveTool(card.source, to: destination, in: menu)
+                }
+            } : nil
+            var actions: [NSAccessibilityCustomAction] = []
+            for (title, destination) in [("Move up", index - 1), ("Move down", index + 1)] where rows.indices.contains(destination) {
+                actions.append(NSAccessibilityCustomAction(name: L10n.text(title), handler: { [weak self, weak menu, weak row] in
+                    guard let self, let menu, let row, self.toolOrder == sources else { return false }
+                    return self.moveTool(row.source, to: destination, in: menu)
+                }))
+            }
+            row.setAccessibilityCustomActions(actions)
+        }
     }
 
     private func updateSummaryItems() {
@@ -1403,19 +1512,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         controller.sourcePopup.selectItem(at: ([SourceMode.auto] + toolOrder).firstIndex(of: .opencode)!)
         send(controller.sourcePopup)
         precondition(mode == .opencode)
-        precondition(!controller.upButton.isEnabled)
-        controller.table.selectRowIndexes(IndexSet(integer: toolOrder.count - 1), byExtendingSelection: false)
-        precondition(!controller.downButton.isEnabled)
-        controller.table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
-        send(controller.upButton)
-        precondition(toolOrder == [.codex, .claude, .opencode, .antigravity])
-        precondition(controller.table.selectedRow == 0, "Selection follows a moved tool")
+        precondition(controller.window!.contentView!.subviews.count == 1, "Settings only contains the two-row grid")
+        let originalItems = Array(menu.items[1...4])
+        let originalViews = originalItems.map { $0.view! }
+        precondition(moveTool(.claude, to: 2, in: menu))
+        precondition(toolOrder == [.codex, .opencode, .claude, .antigravity])
+        precondition(zip(originalItems, menu.items[1...4]).allSatisfy { $0 === $1 }, "Reordering preserves NSMenu slots")
+        precondition(zip(originalViews, menu.items[1...4].map { $0.view! }).allSatisfy { $0 === $1 }, "Reordering preserves attached views")
+        precondition(menu.items.compactMap { ($0.view as? SummaryMenuView)?.source } == toolOrder)
+        precondition(toolOrder.allSatisfy { (summaryItems[$0]?.view as? SummaryMenuView)?.source == $0 })
+        precondition(controller.state?.sources == toolOrder && controller.state?.source == .opencode)
         let restored = AppDelegate(defaults: defaults, detectInstalledTools: { Set(ToolOrder.popular) })
         precondition(restored.toolOrder == toolOrder && restored.mode == mode && restored.display == display)
-        precondition(controller.resetButton.isEnabled && controller.displayPopup.indexOfSelectedItem == 2)
-        send(controller.resetButton)
+        precondition(controller.displayPopup.indexOfSelectedItem == 2)
+        let firstCard = menu.items[1].view as! SummaryMenuView
+        precondition(firstCard.accessibilityCustomActions()?.count == 1)
+        let moveDown = firstCard.accessibilityCustomActions()!.first!
+        precondition(moveDown.name == L10n.text("Move down") && moveDown.handler?() == true)
+        precondition(toolOrder == [.opencode, .codex, .claude, .antigravity], "VoiceOver can reorder without dragging")
+        precondition(moveTool(.claude, to: 0, in: menu))
+        precondition(moveTool(.codex, to: 1, in: menu))
         openMenu()
-        precondition(toolOrder == ToolOrder.popular && !controller.resetButton.isEnabled)
+        precondition(toolOrder == ToolOrder.popular)
         for (index, choice) in StatusDisplay.allCases.enumerated() {
             controller.displayPopup.selectItem(at: index)
             send(controller.displayPopup)
@@ -1431,7 +1549,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             renderStatus(source: .opencode, active: false, speed: nil, elapsed: 0)
             precondition(statusItem.button?.title == "" && currentSymbol == "bolt.fill")
         }
-        print("settings smoke: passed (native window/reopen/source/display/reorder/reset/persistence/status modes/top-level quit)")
+        print("settings smoke: passed (two-row window/reopen/source/display/persistence/status modes/top-level quit)")
+        print("menu reorder tests: passed (fixed slots/source rebinding/VoiceOver actions/persistence)")
     }
 
     func testInstalledVisibility(setInstalled: (Set<SourceMode>) -> Void) {
@@ -1450,19 +1569,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let choices = controller.sourcePopup.itemArray.compactMap { ($0.representedObject as? String).flatMap(SourceMode.init(rawValue:)) }
             precondition(choices == [.auto] + toolOrder)
             precondition(controller.sourcePopup.selectedItem?.representedObject as? String == effectiveMode.rawValue)
-            precondition(controller.table.numberOfRows == available.count)
+            let cards = menu.items.compactMap { $0.view as? SummaryMenuView }
+            precondition(cards.count == available.count)
+            precondition(cards.allSatisfy { ($0.onDrag != nil) == (available.count > 1) })
             precondition(mode == .claude, "Temporarily missing apps must not erase a pinned preference")
             if available.isEmpty {
                 precondition(activeSource == .auto && currentSymbol == "bolt.fill" && statusItem.button?.title == "")
                 precondition(menu.items.contains { $0.title == L10n.text("No tools installed") })
-                precondition(!controller.upButton.isEnabled && !controller.downButton.isEnabled)
             } else {
                 precondition(available.contains(activeSource))
             }
         }
         setInstalled([.codex, .opencode])
         installedSources = detectInstalledTools()
-        moveTool(.codex, by: -1)
+        moveTool(.codex, to: 0)
         precondition(savedToolOrder == [.codex, .claude, .opencode, .antigravity], "Hidden tools retain their saved positions")
         setInstalled(Set(ToolOrder.popular))
         installedSources = detectInstalledTools()
@@ -1587,6 +1707,15 @@ func testPanel(previewDirectory: String?) throws {
     precondition(summary().value == "46.1")
     for source in [SourceMode.codex, .opencode, .claude, .antigravity] {
         precondition(ProviderLogo.image(source)?.isTemplate == true, "Missing template logo: \(source.rawValue)")
+        let card = SummaryMenuView(source: source)
+        card.toolTip = "stale detail"
+        card.update(summary())
+        precondition(card.toolTip == nil, "Hovering a tool card must not show detail text")
+        let logo = card.subviews.compactMap { $0 as? NSImageView }.first!
+        let text = card.subviews.compactMap { $0 as? NSTextField }.filter { $0.frame.minX == 40 }
+        precondition(text.count == 2)
+        let textBounds = text[0].frame.union(text[1].frame)
+        precondition(abs(logo.frame.midY - textBounds.midY) < 0.001, "Logo must center on both text lines")
     }
     precondition(summary().caption(now: now) == L10n.text("This turn"))
     precondition(summary(active: false).value == "31.7")
@@ -1653,7 +1782,7 @@ func testPanel(previewDirectory: String?) throws {
         try capture(root, name: dark ? "panel-dark.png" : "panel-light.png")
         let settings = SettingsWindowController()
         settings.window?.appearance = window.appearance
-        settings.update(SettingsState(sources: ToolOrder.popular, source: .auto, display: .speedAndUnit, customOrder: false))
+        settings.update(SettingsState(sources: ToolOrder.popular, source: .auto, display: .speedAndUnit))
         try capture(settings.window!.contentView!.superview!, name: dark ? "settings-dark.png" : "settings-light.png")
     }
 }
@@ -1688,8 +1817,21 @@ func testPresentationPreferences() {
 
     precondition(ToolOrder.normalized([]) == ToolOrder.popular)
     precondition(ToolOrder.normalized(["auto", "unknown", "opencode", "opencode"]) == [.opencode, .claude, .codex, .antigravity])
-    precondition(ToolOrder.moving(.claude, by: -1, in: ToolOrder.popular) == ToolOrder.popular)
-    precondition(ToolOrder.moving(.antigravity, by: 1, in: ToolOrder.popular) == ToolOrder.popular)
+    precondition(ToolOrder.moving(.claude, to: -1, in: ToolOrder.popular) == ToolOrder.popular)
+    precondition(ToolOrder.moving(.antigravity, to: 4, in: ToolOrder.popular) == ToolOrder.popular)
+    precondition(ToolOrder.moving(.auto, to: 0, in: ToolOrder.popular) == ToolOrder.popular)
+    precondition(ToolOrder.moving(.claude, to: 3, in: ToolOrder.popular) == [.codex, .opencode, .antigravity, .claude])
+    precondition(ToolOrder.moving(.antigravity, to: 0, in: ToolOrder.popular) == [.antigravity, .claude, .codex, .opencode])
+    let frames = (0..<4).map { NSRect(x: 0, y: 168 - $0 * 56, width: 360, height: 56) }
+    precondition(MenuCardReorder.destination(at: NSPoint(x: 100, y: 220), frames: frames, from: 3) == .init(index: 0, slot: 0))
+    precondition(MenuCardReorder.destination(at: NSPoint(x: 100, y: 4), frames: frames, from: 0) == .init(index: 3, slot: 4))
+    precondition(MenuCardReorder.destination(at: NSPoint(x: 100, y: 60), frames: frames, from: 0) == .init(index: 2, slot: 3))
+    for point in [NSPoint(x: -1, y: 100), NSPoint(x: 361, y: 100), NSPoint(x: 100, y: -1), NSPoint(x: 100, y: 225)] {
+        precondition(MenuCardReorder.destination(at: point, frames: frames, from: 0) == nil)
+    }
+    precondition(MenuCardReorder.destination(at: NSPoint(x: 100, y: 200), frames: frames, from: 0) == nil)
+    precondition(MenuCardReorder.destination(at: .zero, frames: [], from: 0) == nil)
+    precondition(MenuCardReorder.destination(at: NSPoint(x: 100, y: 200), frames: [frames[0]], from: 0) == nil)
     for active in [false, true] {
         for display in StatusDisplay.allCases {
             let hidden = !active || display == .iconOnly

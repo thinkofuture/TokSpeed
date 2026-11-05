@@ -37,7 +37,7 @@ The app appears only in the menu bar, not in the Dock. Click its icon to see eac
 
 - **Settings…** opens a native macOS window. Changes save immediately. **Quit** stays in the menu, not in Settings.
 - **Source / Display**: choose **Automatic** or pin a tool; show **Number and unit**, **Number only**, or **Icon only**. While waiting, numbers are elapsed seconds (`s`), not speed (`tok/s`). Idle always shows a lightning icon.
-- **Tool order**: select a tool, then use ↑ / ↓. **Reset** restores Claude Code → Codex → OpenCode → Antigravity, a static popularity-oriented order, not measured user counts.
+- **Tool order**: drag tool cards directly in the open panel. An insertion line shows the new position; release to save. Drop outside the cards or press Escape to cancel. The default is Claude Code → Codex → OpenCode → Antigravity. Sorting does not affect automatic source selection; VoiceOver offers Move up / Move down actions.
 - Trend charts use smooth curves without overshooting the recorded values.
 
 You can drag `build/TokSpeed.app` to your Applications folder. To uninstall, quit and delete the app. Source, display, and tool-order preferences are stored in macOS UserDefaults; after quitting, you can clear them with `defaults delete io.github.thinkofuture.tokspeed`.

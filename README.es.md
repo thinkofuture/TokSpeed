@@ -25,7 +25,7 @@ La aplicación solo aparece en la barra de menús, no en el Dock. Las herramient
 
 - **Ajustes…** abre una ventana nativa de macOS y guarda los cambios al instante. «Salir» sigue al final del menú.
 - **Fuente / Mostrar**: «Automático» o herramienta fija; «Número y unidad», «Solo número» o «Solo icono». En espera muestra segundos (`s`), no velocidad (`tok/s`); en reposo, solo el rayo.
-- **Orden de herramientas**: selecciona una y usa ↑ / ↓. «Restablecer» vuelve a Claude Code → Codex → OpenCode → Antigravity: popularidad estática, no usuarios medidos.
+- **Orden de herramientas**: arrastra las tarjetas directamente en el panel abierto. Una línea indica la posición; suelta para guardar. Suelta fuera de las tarjetas o pulsa Escape para cancelar. Orden predeterminado: Claude Code → Codex → OpenCode → Antigravity. No cambia la selección automática de fuente; VoiceOver ofrece acciones para subir y bajar.
 - Las curvas suaves no sobrepasan los valores de los puntos adyacentes.
 
 Puedes mover `build/TokSpeed.app` a Aplicaciones. Para desinstalar, sal de la aplicación y elimínala. Fuente, visualización y orden se guardan en UserDefaults; tras salir, puedes borrarlos con `defaults delete io.github.thinkofuture.tokspeed`.

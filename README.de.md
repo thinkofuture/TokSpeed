@@ -25,7 +25,7 @@ Die App erscheint nur in der Menüleiste, nicht im Dock. Nicht installierte Tool
 
 - **Einstellungen…** öffnet ein natives macOS-Fenster. Änderungen werden sofort gespeichert. „Beenden“ bleibt am Menüende.
 - **Quelle / Anzeige**: „Automatisch“ oder festes Tool; „Zahl und Einheit“, „Nur Zahl“ oder „Nur Symbol“. Beim Warten erscheinen Sekunden (`s`) statt Geschwindigkeit (`tok/s`), im Leerlauf nur der Blitz.
-- **Tool-Reihenfolge**: Tool auswählen und mit ↑ / ↓ verschieben. „Zurücksetzen“ stellt Claude Code → Codex → OpenCode → Antigravity wieder her: statische Beliebtheit, keine gemessenen Nutzerzahlen.
+- **Tool-Reihenfolge**: Karten direkt im geöffneten Panel ziehen. Eine Einfügelinie zeigt die Position; Loslassen speichert. Außerhalb der Karten ablegen oder Escape drücken, um abzubrechen. Standard: Claude Code → Codex → OpenCode → Antigravity. Die automatische Quellenauswahl bleibt unverändert; VoiceOver bietet Aktionen zum Verschieben nach oben/unten.
 - Glatte Verlaufskurven überschreiten nicht den Wertebereich benachbarter Messpunkte.
 
 Du kannst `build/TokSpeed.app` in den Programme-Ordner ziehen. Zum Deinstallieren die App beenden und löschen. Quelle, Anzeige und Reihenfolge werden in UserDefaults gespeichert und lassen sich nach dem Beenden mit `defaults delete io.github.thinkofuture.tokspeed` löschen.

@@ -37,7 +37,7 @@ open build/TokSpeed.app
 
 - **设置…**：打开原生 macOS 窗口，修改即时保存。**退出**独立放在菜单最后。
 - **来源 / 显示**：选择“自动”或固定工具；支持“数字与单位”“仅数字”“仅图标”。等待时数字表示经过秒数（`s`），非速度（`tok/s`）；空闲时只显示闪电。
-- **工具排序**：选中工具后用 ↑ / ↓ 调整；“重置”恢复 Claude Code → Codex → OpenCode → Antigravity。默认采用静态人气顺序，非实时用户量统计。
+- **工具排序**：直接在展开面板中拖动工具卡片，插入线提示目标位置，松手即保存；拖到卡片区域外或按 Escape 取消。默认顺序为 Claude Code → Codex → OpenCode → Antigravity。排序不影响自动来源选择；VoiceOver 提供“上移 / 下移”操作。
 - 趋势图使用平滑曲线，不超出相邻样本的数值范围。
 
 可将 `build/TokSpeed.app` 拖到“应用程序”文件夹，退出后删除应用即可卸载。来源、显示模式和工具排序偏好保存在 macOS UserDefaults；退出后可用 `defaults delete io.github.thinkofuture.tokspeed` 清除。

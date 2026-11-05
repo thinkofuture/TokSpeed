@@ -25,8 +25,7 @@
 "Quit" = "Beenden";
 "Settings" = "Einstellungen";
 "Source" = "Quelle";
-"Reset" = "Zurücksetzen";
-"Tool order" = "Tool-Reihenfolge";
+"Drag to reorder" = "Zum Sortieren ziehen";
 "Move up" = "Nach oben";
 "Move down" = "Nach unten";
 "This turn: output tokens / total completed-call duration, excluding tool execution; not instantaneous per-token speed." = "Diese Antwort: Ausgabe-Token / Gesamtdauer abgeschlossener Aufrufe, ohne Tool-Ausführung; keine momentane Geschwindigkeit pro Token.";

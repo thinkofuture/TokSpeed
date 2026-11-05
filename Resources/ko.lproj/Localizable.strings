@@ -25,8 +25,7 @@
 "Quit" = "종료";
 "Settings" = "설정";
 "Source" = "소스";
-"Reset" = "초기화";
-"Tool order" = "도구 순서";
+"Drag to reorder" = "드래그하여 순서 변경";
 "Move up" = "위로 이동";
 "Move down" = "아래로 이동";
 "This turn: output tokens / total completed-call duration, excluding tool execution; not instantaneous per-token speed." = "이번 응답: 출력 토큰 수 ÷ 완료된 호출의 총 소요 시간. 도구 실행 시간은 제외하며 토큰별 순간 속도가 아닙니다.";
