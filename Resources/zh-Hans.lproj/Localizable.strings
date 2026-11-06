@@ -31,3 +31,4 @@
 "This turn: output tokens / total completed-call duration, excluding tool execution; not instantaneous per-token speed." = "本轮：已完成调用的输出 token ÷ 调用耗时之和，不含工具执行；非逐 token 瞬时速度。";
 "Claude measures from request start to the first complete output block, including time to first token." = "Claude 按请求开始到首个完整输出块计时，含首 token 延迟。";
 "Last call: output tokens / (time to first token + streaming duration); updated after completion." = "上次调用：输出 token ÷（首 token 延迟 + 流式生成时长）；调用完成后更新。";
+"Last call: output tokens / logged API latency (rounded to 0.1 s); updated after completion. No live generation state." = "上次调用：输出 token ÷ 日志中的 API 耗时（精度 0.1 秒）；完成后更新，不显示实时生成状态。";

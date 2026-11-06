@@ -31,3 +31,4 @@
 "This turn: output tokens / total completed-call duration, excluding tool execution; not instantaneous per-token speed." = "今回：出力トークン数 ÷ 完了した呼び出しの合計時間。ツール実行時間は除外し、トークン単位の瞬間速度ではありません。";
 "Claude measures from request start to the first complete output block, including time to first token." = "Claude はリクエスト開始から最初の完全な出力ブロックまでを計測し、最初のトークンの待ち時間を含みます。";
 "Last call: output tokens / (time to first token + streaming duration); updated after completion." = "前回：出力トークン数 ÷（最初のトークンの待ち時間 + ストリーミング時間）。完了後に更新します。";
+"Last call: output tokens / logged API latency (rounded to 0.1 s); updated after completion. No live generation state." = "前回の呼び出し：出力トークン数 ÷ ログの API 所要時間（0.1 秒単位）。完了後に更新。生成中の状態表示はありません。";

@@ -31,3 +31,4 @@
 "This turn: output tokens / total completed-call duration, excluding tool execution; not instantaneous per-token speed." = "Cette réponse : tokens de sortie / durée totale des appels terminés, hors exécution des outils ; pas une vitesse instantanée par token.";
 "Claude measures from request start to the first complete output block, including time to first token." = "Claude mesure du début de la requête au premier bloc de sortie complet, délai du premier token inclus.";
 "Last call: output tokens / (time to first token + streaming duration); updated after completion." = "Dernier appel : tokens de sortie / (délai du premier token + durée du streaming) ; mise à jour après la fin.";
+"Last call: output tokens / logged API latency (rounded to 0.1 s); updated after completion. No live generation state." = "Dernier appel : tokens de sortie / durée API journalisée (arrondie à 0,1 s) ; mis à jour après la fin. Aucun état de génération en direct.";
