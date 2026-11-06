@@ -519,7 +519,11 @@ final class AntigravityReader {
     private(set) var sessionID = ""
     private(set) var inFlightStart: Date?
     private(set) var available = false
-    private let root = (NSHomeDirectory() as NSString).appendingPathComponent(".gemini/antigravity")
+    private let root: String
+
+    init(root: String = (NSHomeDirectory() as NSString).appendingPathComponent(".gemini/antigravity")) {
+        self.root = root
+    }
 
     private func open(_ path: String) -> OpaquePointer? {
         var db: OpaquePointer?
@@ -537,36 +541,76 @@ final class AntigravityReader {
         return Data(bytes: ptr, count: size)
     }
 
-    func poll() {
-        available = false
+    func poll(now: Date = Date()) {
+        // A transient read failure must not hide an already completed measurement.
         inFlightStart = nil
         guard let summary = open((root as NSString).appendingPathComponent("conversation_summaries.db")) else { return }
         defer { sqlite3_close_v2(summary) }
         var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(summary, "SELECT conversation_id, status FROM conversation_summaries ORDER BY last_modified_time DESC LIMIT 1", -1, &statement, nil) == SQLITE_OK else { return }
+        guard sqlite3_prepare_v2(summary, "SELECT conversation_id, status FROM conversation_summaries ORDER BY last_modified_time DESC LIMIT 50", -1, &statement, nil) == SQLITE_OK else { return }
         defer { sqlite3_finalize(statement) }
-        guard sqlite3_step(statement) == SQLITE_ROW, let idText = sqlite3_column_text(statement, 0) else { return }
-        let id = String(cString: idText)
-        guard UUID(uuidString: id) != nil else { return }
-        let status = sqlite3_column_text(statement, 1).map { String(cString: $0) } ?? ""
+        var candidates: [(id: String, running: Bool)] = []
+        var result = sqlite3_step(statement)
+        while result == SQLITE_ROW {
+            if let text = sqlite3_column_text(statement, 0) {
+                let id = String(cString: text)
+                if UUID(uuidString: id) != nil {
+                    let status = sqlite3_column_text(statement, 1).map { String(cString: $0) } ?? ""
+                    candidates.append((id, status == "CASCADE_RUN_STATUS_RUNNING"))
+                }
+            }
+            result = sqlite3_step(statement)
+        }
+        guard result == SQLITE_DONE else { return }
+        var readFailed = false
+        for (index, candidate) in candidates.enumerated() {
+            guard let conversation = load(candidate.id) else { readFailed = true; continue }
+            // Historical fallback sessions must never appear to be generating now.
+            if index == 0, candidate.running, let latest = conversation.latestStep {
+                let age = now.timeIntervalSince(latest)
+                if age >= 0 && age < 900 { inFlightStart = latest }
+            }
+            guard !conversation.samples.isEmpty else { continue }
+            if readFailed, candidates.contains(where: { $0.id == sessionID }),
+               let previous = samples.last, let fallback = conversation.samples.last,
+               previous.completedAt > fallback.completedAt { return }
+            sessionID = candidate.id
+            samples = conversation.samples
+            available = true
+            return
+        }
+        // Only clear history after a successful read proves there are no samples.
+        if !readFailed {
+            sessionID = ""
+            samples = []
+            available = false
+        }
+    }
+
+    private func load(_ id: String) -> (samples: [Sample], latestStep: Date?)? {
         let path = (root as NSString).appendingPathComponent("conversations/\(id).db")
-        guard let db = open(path) else { return }
+        guard let db = open(path) else { return nil }
         defer { sqlite3_close_v2(db) }
 
         var steps: [Int: Date] = [:]
         var stepQuery: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "SELECT idx, metadata FROM steps ORDER BY idx DESC LIMIT 1000", -1, &stepQuery, nil) == SQLITE_OK else { return }
-        while sqlite3_step(stepQuery) == SQLITE_ROW {
+        guard sqlite3_prepare_v2(db, "SELECT idx, metadata FROM steps ORDER BY idx DESC LIMIT 1000", -1, &stepQuery, nil) == SQLITE_OK else { return nil }
+        var result = sqlite3_step(stepQuery)
+        while result == SQLITE_ROW {
+            defer { result = sqlite3_step(stepQuery) }
             guard let data = blob(stepQuery, 1), let proto = ProtoFields(data),
                   let time = proto.duration(7) ?? proto.duration(1), time > 0 else { continue }
             steps[Int(sqlite3_column_int64(stepQuery, 0))] = Date(timeIntervalSince1970: time)
         }
         sqlite3_finalize(stepQuery)
+        guard result == SQLITE_DONE else { return nil }
 
         var query: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "SELECT data FROM gen_metadata ORDER BY idx DESC LIMIT 300", -1, &query, nil) == SQLITE_OK else { return }
+        guard sqlite3_prepare_v2(db, "SELECT data FROM gen_metadata ORDER BY idx DESC LIMIT 300", -1, &query, nil) == SQLITE_OK else { return nil }
         var found: [Sample] = []
-        while sqlite3_step(query) == SQLITE_ROW {
+        result = sqlite3_step(query)
+        while result == SQLITE_ROW {
+            defer { result = sqlite3_step(query) }
             guard let data = blob(query, 0), let entry = ProtoFields(data),
                   let chat = entry.message(1), let usage = chat.message(4),
                   let output = usage.integer(3), output > 0, output <= UInt64(Int64.max),
@@ -583,13 +627,8 @@ final class AntigravityReader {
                 cachedInput: Int64(cached), output: Int64(output), reasoning: Int64(reasoning), total: Int64(output)))
         }
         sqlite3_finalize(query)
-        sessionID = id
-        samples = found.sorted { $0.completedAt < $1.completedAt }
-        let latest = steps.values.max()
-        inFlightStart = status == "CASCADE_RUN_STATUS_RUNNING" ? latest.flatMap {
-            Date().timeIntervalSince($0) < 900 ? $0 : nil
-        } : nil
-        available = true
+        guard result == SQLITE_DONE else { return nil }
+        return (found.sorted { $0.completedAt < $1.completedAt }, steps.values.max())
     }
 
     private static func lastPackedIndex(_ data: Data) -> Int? {
@@ -1820,6 +1859,7 @@ func testRolloutIncrementalRead() throws {
 func testPanel(previewDirectory: String?) throws {
     try testRolloutIncrementalRead()
     try testHermesReader()
+    try testAntigravityReader()
     try testInstalledTools()
     testPresentationPreferences()
     if Bundle.main.bundleURL.pathExtension == "app" {
