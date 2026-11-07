@@ -5,7 +5,8 @@ enum InstalledTools {
         .codex: ("Codex", "com.openai.codex"),
         .opencode: ("OpenCode", "ai.opencode.desktop"),
         .claude: ("Claude", "com.anthropic.claudefordesktop"),
-        .antigravity: ("Antigravity", "com.google.antigravity")
+        .antigravity: ("Antigravity", "com.google.antigravity"),
+        .cursor: ("Cursor", "com.todesktop.230313mzl4w4u92")
     ]
 
     static func detect(environment: [String: String] = ProcessInfo.processInfo.environment,

@@ -32,3 +32,4 @@
 "Claude measures from request start to the first complete output block, including time to first token." = "Claude는 요청 시작부터 첫 번째 완전한 출력 블록까지 측정하며 첫 토큰 대기 시간을 포함합니다.";
 "Last call: output tokens / (time to first token + streaming duration); updated after completion." = "지난 호출: 출력 토큰 수 ÷ (첫 토큰 대기 시간 + 스트리밍 시간). 완료 후 갱신됩니다.";
 "Last call: output tokens / logged API latency (rounded to 0.1 s); updated after completion. No live generation state." = "지난 호출: 출력 토큰 ÷ 로그의 API 소요 시간(0.1초 단위). 완료 후 갱신하며 실시간 생성 상태는 표시하지 않습니다.";
+"Cursor hook: last completed turn. Recorded output tokens / whole-turn time from prompt submit to loop stop, including thinking, tools and waiting; not pure model generation speed. While a turn runs, the menu bar shows elapsed time only." = "Cursor hook: 마지막으로 완료된 턴. 기록된 출력 토큰 / 프롬프트 제출부터 루프 종료까지의 전체 시간(추론·도구·대기 포함)이지 순수 모델 생성 속도는 아닙니다. 진행 중에는 메뉴 막대에 경과 시간만 표시됩니다.";

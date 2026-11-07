@@ -2,6 +2,10 @@ import AppKit
 import Foundation
 import SQLite3
 
+// Cursor launches this executable directly as a hook. Handle that before
+// AppKit starts so the collector is fast and never creates a visible app.
+if CursorHook.runIfRequested() { exit(0) }
+
 // MARK: - Model
 
 struct Sample {
@@ -773,7 +777,7 @@ enum Fmt {
 // MARK: - App
 
 enum SourceMode: String {
-    case auto, codex, opencode, claude, antigravity, hermes
+    case auto, codex, opencode, claude, antigravity, hermes, cursor
 
     var label: String {
         switch self {
@@ -783,6 +787,7 @@ enum SourceMode: String {
         case .claude: return "Claude Code"
         case .antigravity: return "Antigravity"
         case .hermes: return "Hermes"
+        case .cursor: return "Cursor"
         }
     }
 
@@ -792,14 +797,15 @@ enum SourceMode: String {
         case .opencode: return "terminal.fill"
         case .claude: return "sparkles"
         case .antigravity: return "moon.stars.fill"
-        case .hermes: return "paperplane.fill"
+        case .hermes: return "person.crop.circle.fill"
+        case .cursor: return "cursorarrow"
         }
     }
 }
 
 enum ToolOrder {
     // A static popularity-oriented default, not a measured or network-fetched ranking.
-    static let popular: [SourceMode] = [.claude, .codex, .opencode, .antigravity, .hermes]
+    static let popular: [SourceMode] = [.claude, .codex, .opencode, .antigravity, .hermes, .cursor]
 
     static func normalized(_ saved: [String]) -> [SourceMode] {
         var result: [SourceMode] = []
@@ -848,13 +854,6 @@ enum ProviderLogo {
     static func image(_ source: SourceMode) -> NSImage? {
         if source == .auto { return nil }
         if let image = cache[source] { return image }
-        // A system symbol identifies Hermes until a licensed monochrome mark is bundled.
-        if source == .hermes {
-            let image = NSImage(systemSymbolName: source.symbol, accessibilityDescription: source.label)
-            image?.isTemplate = true
-            cache[source] = image
-            return image
-        }
         let bundle = Bundle.main.resourceURL?.appendingPathComponent("Logos")
         let development = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("Resources/Logos")
         let urls = [bundle, development].compactMap { $0?.appendingPathComponent("\(source.rawValue).svg") }
@@ -1259,10 +1258,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let claude = ClaudeReader()
     private let antigravity = AntigravityReader()
     private let hermes = HermesReader()
+    private let cursor = CursorReader()
     private var timer: Timer?
     private var statusItem: NSStatusItem!
     private var lastScan = Date.distantPast
     private var lastOpenCodePoll = Date.distantPast
+    private var lastCursorHookAttempt = Date.distantPast
+    private var cursorHookReady = false
     var selftest = false
     private var currentSymbol = "-"
     private var summaryItems: [SourceMode: NSMenuItem] = [:]
@@ -1308,7 +1310,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             (.opencode, isOpenCodeGenerating, max(oc.samples.last?.completedAt ?? .distantPast, oc.inFlightStart ?? .distantPast)),
             (.claude, claude.inFlightStart != nil, max(claude.samples.last?.completedAt ?? .distantPast, claude.inFlightStart ?? .distantPast)),
             (.antigravity, antigravity.inFlightStart != nil, antigravity.available ? max(antigravity.samples.last?.completedAt ?? .distantPast, antigravity.inFlightStart ?? .distantPast) : .distantPast),
-            (.hermes, false, hermes.samples.last?.completedAt ?? .distantPast)
+            (.hermes, false, hermes.samples.last?.completedAt ?? .distantPast),
+            (.cursor, cursor.inFlightStart != nil, max(cursor.samples.last?.completedAt ?? .distantPast, cursor.inFlightStart ?? .distantPast))
         ]
         return Self.preferredSource(mode: effectiveMode, activity: activity.filter { installedSources.contains($0.source) })
     }
@@ -1342,6 +1345,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         print("selftest: claude live=\(claude.liveTPS().map { Fmt.tps($0) } ?? "-") turnOut=\(claude.turnOutput)")
         print("selftest: antigravity=\(antigravity.samples.count) last=\(antigravity.samples.last.map { Fmt.tps($0.effectiveTPS) } ?? "-") session=\(antigravity.sessionID)")
         print("selftest: hermes=\(hermes.samples.count) last=\(hermes.samples.last.map { Fmt.tps($0.effectiveTPS) } ?? "-")")
+        print("selftest: cursor=\(cursor.samples.count) last=\(cursor.samples.last.map { Fmt.tps($0.effectiveTPS) } ?? "-") active=\(cursor.inFlightStart != nil)")
         print("selftest: generating codex=\(isCodexGenerating) opencode=\(isOpenCodeGenerating)")
         print("selftest: live codex=\(reader.liveTPS().map { Fmt.tps($0) } ?? "-") turnOut=\(reader.turnOutput) opencode=\(oc.liveTPS().map { Fmt.tps($0) } ?? "-") turnOut=\(oc.turnOutput)")
         if let menu = statusItem.menu {
@@ -1363,6 +1367,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if installedSources.contains(.hermes) { hermes.poll() }
         } else if installedSources.contains(.codex), !reader.path.isEmpty {
             reader.read(URL(fileURLWithPath: reader.path))
+        }
+        if installedSources.contains(.cursor) {
+            if !cursorHookReady, Date().timeIntervalSince(lastCursorHookAttempt) > 60 {
+                lastCursorHookAttempt = Date()
+                let status = CursorHookInstaller.install()
+                cursorHookReady = status.error == nil
+                if let error = status.error { fputs("Cursor hook: \(error)\n", stderr) }
+            }
+            cursor.poll()
         }
         if Date().timeIntervalSince(lastOpenCodePoll) > 2 {
             lastOpenCodePoll = Date()
@@ -1388,6 +1401,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .auto: return false
         case .claude: return claude.inFlightStart != nil
         case .antigravity: return antigravity.inFlightStart != nil
+        case .cursor: return cursor.inFlightStart != nil
         case .hermes: return false
         }
     }
@@ -1399,6 +1413,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .auto: return nil
         case .claude: return claude.liveTPS()
         case .antigravity: return nil
+        case .cursor: return nil
         case .hermes: return nil
         }
     }
@@ -1417,6 +1432,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return Date().timeIntervalSince(start)
         case .antigravity:
             guard let start = antigravity.inFlightStart else { return nil }
+            return Date().timeIntervalSince(start)
+        case .cursor:
+            guard let start = cursor.inFlightStart else { return nil }
             return Date().timeIntervalSince(start)
         case .hermes: return nil
         }
@@ -1592,6 +1610,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             completed: hermes.samples.last?.completedAt, history: hermes.samples.map(\.effectiveTPS),
             model: hermes.samples.last?.model ?? "",
             measurement: L10n.text("Last call: output tokens / logged API latency (rounded to 0.1 s); updated after completion. No live generation state."))
+        update(.cursor, active: cursor.inFlightStart != nil, live: nil, last: cursor.samples.last?.effectiveTPS,
+            completed: cursor.samples.last?.completedAt, history: cursor.samples.map(\.effectiveTPS),
+            model: cursor.samples.last?.model ?? cursor.inFlightModel,
+            measurement: L10n.text("Cursor hook: last completed turn. Recorded output tokens / whole-turn time from prompt submit to loop stop, including thinking, tools and waiting; not pure model generation speed. While a turn runs, the menu bar shows elapsed time only."))
     }
 
     private func section(_ title: String, symbol: String, highlight: Bool) -> NSMenuItem {
@@ -1670,7 +1692,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let originalItems = menu.items.filter { $0.view is SummaryMenuView }
         let originalViews = originalItems.map { $0.view! }
         precondition(moveTool(.claude, to: 2, in: menu))
-        precondition(toolOrder == [.codex, .opencode, .claude, .antigravity, .hermes])
+        precondition(toolOrder == [.codex, .opencode, .claude, .antigravity, .hermes, .cursor])
         let reorderedItems = menu.items.filter { $0.view is SummaryMenuView }
         precondition(zip(originalItems, reorderedItems).allSatisfy { $0 === $1 }, "Reordering preserves NSMenu slots")
         precondition(zip(originalViews, reorderedItems.map { $0.view! }).allSatisfy { $0 === $1 }, "Reordering preserves attached views")
@@ -1684,7 +1706,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         precondition(firstCard.accessibilityCustomActions()?.count == 1)
         let moveDown = firstCard.accessibilityCustomActions()!.first!
         precondition(moveDown.name == L10n.text("Move down") && moveDown.handler?() == true)
-        precondition(toolOrder == [.opencode, .codex, .claude, .antigravity, .hermes], "VoiceOver can reorder without dragging")
+        precondition(toolOrder == [.opencode, .codex, .claude, .antigravity, .hermes, .cursor], "VoiceOver can reorder without dragging")
         precondition(moveTool(.claude, to: 0, in: menu))
         precondition(moveTool(.codex, to: 1, in: menu))
         openMenu()
@@ -1714,7 +1736,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         mode = .claude
         defaults.set(["opencode", "claude", "codex", "antigravity"], forKey: "toolOrder")
-        for available: Set<SourceMode> in [[.codex, .opencode], [.claude], [.hermes], []] {
+        for available: Set<SourceMode> in [[.codex, .opencode], [.claude], [.hermes], [.cursor], []] {
             setInstalled(available)
             installedSources = detectInstalledTools()
             rebuildMenu(menu)
@@ -1738,7 +1760,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setInstalled([.codex, .opencode])
         installedSources = detectInstalledTools()
         moveTool(.codex, to: 0)
-        precondition(savedToolOrder == [.codex, .claude, .opencode, .antigravity, .hermes], "Hidden tools retain their saved positions")
+        precondition(savedToolOrder == [.codex, .claude, .opencode, .antigravity, .hermes, .cursor], "Hidden tools retain their saved positions")
         setInstalled(Set(ToolOrder.popular))
         installedSources = detectInstalledTools()
         precondition(effectiveMode == .claude && toolOrder == savedToolOrder)
@@ -1750,6 +1772,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 // MARK: - Headless verification mode
 
 func runOnce() -> Int32 {
+    if let idx = CommandLine.arguments.firstIndex(of: "--source"), idx + 1 < CommandLine.arguments.count,
+       CommandLine.arguments[idx + 1] == "cursor" {
+        let logIndex = CommandLine.arguments.firstIndex(of: "--log")
+        let path = logIndex.flatMap { $0 + 1 < CommandLine.arguments.count ? CommandLine.arguments[$0 + 1] : nil } ?? CursorReader.logPath()
+        let reader = CursorReader(logPath: path)
+        reader.poll()
+        print("log:       \(path)")
+        guard reader.readable else {
+            print("No Cursor hook log yet. Complete a local Agents Window turn after the integration is installed.")
+            return 1
+        }
+        print("samples:   \(reader.samples.count)")
+        print("generating:\(reader.inFlightStart != nil)")
+        if let sample = reader.samples.last {
+            print("model:     \(sample.model)")
+            print("output:    \(sample.output)")
+            print("elapsed:   \(Fmt.secs(sample.elapsed))")
+            print("speed:     \(Fmt.tps(sample.effectiveTPS)) tok/s (whole turn, including tools/waits)")
+        } else {
+            print("no completed Cursor turn with recorded output usage and a hook start/stop pair")
+        }
+        return 0
+    }
     if let idx = CommandLine.arguments.firstIndex(of: "--source"), idx + 1 < CommandLine.arguments.count,
        CommandLine.arguments[idx + 1] == "hermes" {
         let reader = HermesReader()
@@ -1859,6 +1904,7 @@ func testRolloutIncrementalRead() throws {
 func testPanel(previewDirectory: String?) throws {
     try testRolloutIncrementalRead()
     try testHermesReader()
+    try testCursorReader()
     try testAntigravityReader()
     try testInstalledTools()
     testPresentationPreferences()
@@ -1876,6 +1922,10 @@ func testPanel(previewDirectory: String?) throws {
     }
     precondition(summary().value == "46.1")
     for source in ToolOrder.popular {
+        if Bundle.main.bundleURL.pathExtension == "app" {
+            precondition(Bundle.main.url(forResource: source.rawValue, withExtension: "svg", subdirectory: "Logos") != nil,
+                "Missing bundled provider artwork: \(source.rawValue)")
+        }
         precondition(ProviderLogo.image(source)?.isTemplate == true, "Missing template logo: \(source.rawValue)")
         let card = SummaryMenuView(source: source)
         card.toolTip = "stale detail"
@@ -1917,25 +1967,28 @@ func testPanel(previewDirectory: String?) throws {
         print("preview: \(path)")
     }
     for dark in [true, false] {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 388), styleMask: [.borderless], backing: .buffered, defer: false)
+        let height = 108 + CGFloat(ToolOrder.popular.count) * 56
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: height), styleMask: [.borderless], backing: .buffered, defer: false)
         window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         let root = window.contentView!
         root.wantsLayer = true
         root.layer?.backgroundColor = NSColor(white: dark ? 0.13 : 0.96, alpha: 1).cgColor
         let header = PanelHeaderView(frame: .zero)
-        header.frame.origin.y = 354
+        header.frame.origin.y = height - 34
         root.addSubview(header)
         let examples: [(SourceMode, Bool, Double?, Double?, [Double])] = [
             (.claude, true, 113, 99, [65, 80, 75, 110, 98, 125, 104, 115, 106, 131, 120, 113]),
             (.codex, true, 46.1, 31.7, [22, 28, 24, 40, 32, 39, 51, 36, 42, 35, 49, 46]),
             (.opencode, false, nil, 16.2, [8, 14, 11, 13, 19, 15, 20, 16, 14, 18, 17, 16.2]),
             (.antigravity, true, nil, 30.8, [22, 28, 31, 20, 34, 24, 29, 32, 26, 33, 29, 30.8]),
-            (.hermes, false, nil, 34.8, [18, 25, 22, 31, 28, 36, 30, 33, 29, 38, 32, 34.8])
+            (.hermes, false, nil, 34.8, [18, 25, 22, 31, 28, 36, 30, 33, 29, 38, 32, 34.8]),
+            (.cursor, false, nil, nil, [])
         ]
         for (index, entry) in examples.enumerated() {
             let (source, active, live, last, history) = entry
             let view = SummaryMenuView(source: source)
-            view.frame.origin.y = 298 - CGFloat(index) * 56
+            view.frame.origin.y = height - 90 - CGFloat(index) * 56
+            precondition(view.frame.minY >= 74, "Preview cards must not overlap the settings and quit actions")
             view.update(SpeedSummary(name: source.label, active: active, live: live, last: last,
                 completedAt: now.addingTimeInterval(-8), history: history, model: "test", measurement: "test"))
             root.addSubview(view)
@@ -1985,13 +2038,13 @@ func testPresentationPreferences() {
     print("localization tests: passed (8 languages, matching/fallback/completeness/format arguments); selected=\(L10n.language)")
 
     precondition(ToolOrder.normalized([]) == ToolOrder.popular)
-    precondition(ToolOrder.normalized(["auto", "unknown", "opencode", "opencode"]) == [.opencode, .claude, .codex, .antigravity, .hermes])
-    precondition(ToolOrder.normalized(["claude", "codex", "opencode", "antigravity"]) == ToolOrder.popular, "Existing preferences gain Hermes without reordering tools")
+    precondition(ToolOrder.normalized(["auto", "unknown", "opencode", "opencode"]) == [.opencode, .claude, .codex, .antigravity, .hermes, .cursor])
+    precondition(ToolOrder.normalized(["claude", "codex", "opencode", "antigravity", "hermes"]) == ToolOrder.popular, "Existing preferences gain Cursor without reordering tools")
     precondition(ToolOrder.moving(.claude, to: -1, in: ToolOrder.popular) == ToolOrder.popular)
     precondition(ToolOrder.moving(.antigravity, to: ToolOrder.popular.count, in: ToolOrder.popular) == ToolOrder.popular)
     precondition(ToolOrder.moving(.auto, to: 0, in: ToolOrder.popular) == ToolOrder.popular)
-    precondition(ToolOrder.moving(.claude, to: 3, in: ToolOrder.popular) == [.codex, .opencode, .antigravity, .claude, .hermes])
-    precondition(ToolOrder.moving(.antigravity, to: 0, in: ToolOrder.popular) == [.antigravity, .claude, .codex, .opencode, .hermes])
+    precondition(ToolOrder.moving(.claude, to: 3, in: ToolOrder.popular) == [.codex, .opencode, .antigravity, .claude, .hermes, .cursor])
+    precondition(ToolOrder.moving(.antigravity, to: 0, in: ToolOrder.popular) == [.antigravity, .claude, .codex, .opencode, .hermes, .cursor])
     let frames = (0..<4).map { NSRect(x: 0, y: 168 - $0 * 56, width: 360, height: 56) }
     precondition(MenuCardReorder.destination(at: NSPoint(x: 100, y: 220), frames: frames, from: 3) == .init(index: 0, slot: 0))
     precondition(MenuCardReorder.destination(at: NSPoint(x: 100, y: 4), frames: frames, from: 0) == .init(index: 3, slot: 4))
@@ -2015,6 +2068,8 @@ func testPresentationPreferences() {
     precondition(AppDelegate.preferredSource(mode: .auto, activity: [(.codex, false, now.addingTimeInterval(-30)), (.opencode, false, now)]) == .opencode)
     precondition(AppDelegate.preferredSource(mode: .claude, activity: [(.codex, true, now)]) == .claude)
     precondition(AppDelegate.preferredSource(mode: .auto, activity: [(.codex, false, now.addingTimeInterval(-30)), (.hermes, false, now)]) == .hermes)
+    precondition(AppDelegate.preferredSource(mode: .auto, activity: [(.cursor, false, now), (.codex, true, now.addingTimeInterval(-30))]) == .codex)
+    precondition(AppDelegate.preferredSource(mode: .auto, activity: [(.cursor, false, now), (.codex, false, now.addingTimeInterval(-30))]) == .cursor)
 
     for values: [Double] in [[], [12], [12, 24], [0, 100, 0, 100, 1], [50, 50, 50], [1, 2, 4, 100]] {
         let points = values.enumerated().map { NSPoint(x: Double($0.offset) * 10, y: $0.element) }
@@ -2067,6 +2122,7 @@ func testInstalledTools() throws {
     try write(".local/share/opencode/opencode.db")
     try write(".gemini/antigravity/conversation_summaries.db")
     try write(".hermes/logs/agent.log")
+    try write("Library/Application Support/Cursor/User/globalStorage/state.vscdb")
     precondition(detect().isEmpty, "Leftover data is not an installation")
     try write(".local/bin/codex", executable: true)
     try write(".opencode/bin/opencode", executable: true)
@@ -2075,8 +2131,15 @@ func testInstalledTools() throws {
     let path = root.appendingPathComponent("custom/bin").path
     precondition(detect(path: path) == [.codex, .opencode, .claude], "A non-executable file is not a CLI")
     try write(".local/bin/hermes", executable: true)
+    try write(".local/bin/cursor", executable: true)
     try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.appendingPathComponent("custom/bin/antigravity").path)
     precondition(detect(path: path) == Set(ToolOrder.popular))
+    try fm.removeItem(at: root.appendingPathComponent(".local/bin/cursor"))
+    try write("Applications/Cursor.app/Contents/MacOS/Cursor", executable: true)
+    try PropertyListSerialization.data(fromPropertyList: ["CFBundleExecutable": "Cursor",
+        "CFBundleIdentifier": "com.todesktop.230313mzl4w4u92", "CFBundlePackageType": "APPL"], format: .xml, options: 0)
+        .write(to: root.appendingPathComponent("Applications/Cursor.app/Contents/Info.plist"))
+    precondition(detect(path: path).contains(.cursor), "Cursor desktop-only installations must be visible")
     let app = root.appendingPathComponent("Applications/Antigravity.app")
     try write("Applications/Antigravity.app/Contents/MacOS/Antigravity", executable: true)
     let info: [String: String] = ["CFBundleExecutable": "Antigravity", "CFBundleIdentifier": "com.google.antigravity", "CFBundlePackageType": "APPL"]
@@ -2096,6 +2159,20 @@ func testInstalledTools() throws {
 }
 
 let args = CommandLine.arguments
+if args.contains("--install-cursor-hook") || args.contains("--uninstall-cursor-hook") {
+    let status = args.contains("--uninstall-cursor-hook")
+        ? CursorHookInstaller.remove()
+        : CursorHookInstaller.install()
+    if let error = status.error {
+        fputs("Cursor hook: \(error)\n", stderr)
+        exit(1)
+    }
+    print("Cursor hook \(args.contains("--uninstall-cursor-hook") ? "removed" : (status.changed ? "installed" : "already installed")).")
+    print("Config: \(status.config)")
+    if let backup = status.backup { print("Backup: \(backup)") }
+    print("Log:    \(CursorReader.logPath())")
+    exit(0)
+}
 if args.contains("--once") { exit(runOnce()) }
 if args.contains("--test-panel") {
     _ = NSApplication.shared

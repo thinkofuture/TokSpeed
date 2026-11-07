@@ -32,3 +32,4 @@
 "Claude measures from request start to the first complete output block, including time to first token." = "Claude 按请求开始到首个完整输出块计时，含首 token 延迟。";
 "Last call: output tokens / (time to first token + streaming duration); updated after completion." = "上次调用：输出 token ÷（首 token 延迟 + 流式生成时长）；调用完成后更新。";
 "Last call: output tokens / logged API latency (rounded to 0.1 s); updated after completion. No live generation state." = "上次调用：输出 token ÷ 日志中的 API 耗时（精度 0.1 秒）；完成后更新，不显示实时生成状态。";
+"Cursor hook: last completed turn. Recorded output tokens / whole-turn time from prompt submit to loop stop, including thinking, tools and waiting; not pure model generation speed. While a turn runs, the menu bar shows elapsed time only." = "Cursor Hook：上一轮已完成回合。记录的输出 token 数 ÷ 从提交提示到循环停止的整轮时间（包括思考、工具和等待），不是纯模型生成速度。运行期间菜单栏仅显示经过时间。";
