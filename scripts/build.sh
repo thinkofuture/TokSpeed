@@ -34,10 +34,12 @@ xcrun swiftc -swift-version 5 -O \
     -target "$(uname -m)-apple-macosx13.0" \
     -module-cache-path "$BUILD_DIR/ModuleCache" \
     -framework AppKit -lsqlite3 \
-    main.swift Localization.swift InstalledTools.swift SettingsWindow.swift MenuCardReorder.swift HermesReader.swift HermesReaderTests.swift AntigravityReaderTests.swift CursorHook.swift CursorHookInstaller.swift CursorReader.swift CursorReaderTests.swift -o "$APP/Contents/MacOS/TokSpeed"
+    main.swift Localization.swift InstalledTools.swift SettingsWindow.swift MenuCardReorder.swift HermesReader.swift HermesReaderTests.swift HermesPluginInstaller.swift AntigravityReaderTests.swift OpenCodeReaderTests.swift CursorHook.swift CursorHookInstaller.swift CursorReader.swift CursorReaderTests.swift -o "$APP/Contents/MacOS/TokSpeed"
 
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/Logos/*.svg Resources/Logos/NOTICE.md "$RESOURCES/Logos/"
+mkdir -p "$RESOURCES/HermesPlugin"
+cp Resources/HermesPlugin/plugin.yaml Resources/HermesPlugin/__init__.py "$RESOURCES/HermesPlugin/"
 for localization in Resources/*.lproj; do
     mkdir -p "$RESOURCES/$(basename "$localization")"
     cp "$localization/Localizable.strings" "$RESOURCES/$(basename "$localization")/"

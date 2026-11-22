@@ -56,14 +56,20 @@ final class RolloutReader {
     private(set) var sessionID = ""
     private(set) var path = ""
     private(set) var inFlightStart: Date?
-    private(set) var turnActive = false
+    private var turnOpen = false
+    private var lastEventAt: Date?
+    func isActive(at now: Date) -> Bool {
+        guard turnOpen, let lastEventAt else { return false }
+        return abs(now.timeIntervalSince(lastEventAt)) < 15 * 60
+    }
+    var turnActive: Bool { isActive(at: Date()) }
     private(set) var turnStart: Date?
     private(set) var turnOutput: Int64 = 0
     private(set) var turnGenSeconds: Double = 0
 
     /// 本次回复的实时速度 = 已完成调用的输出 token ÷ 这些调用的实际生成时间（不含工具执行）
     func liveTPS(now: Date = Date()) -> Double? {
-        guard turnActive, turnOutput > 0, turnGenSeconds > 0 else { return nil }
+        guard isActive(at: now), turnOutput > 0, turnGenSeconds > 0 else { return nil }
         return Double(turnOutput) / turnGenSeconds
     }
 
@@ -108,7 +114,8 @@ final class RolloutReader {
         model = ""
         sessionID = ""
         inFlightStart = nil
-        turnActive = false
+        turnOpen = false
+        lastEventAt = nil
         turnStart = nil
         turnOutput = 0
         turnGenSeconds = 0
@@ -136,6 +143,7 @@ final class RolloutReader {
         let type = (row["type"] as? String) ?? ""
         let payload = (row["payload"] as? [String: Any]) ?? [:]
         let payloadType = (payload["type"] as? String) ?? ""
+        lastEventAt = ts
 
         switch (type, payloadType) {
         case ("session_meta", _):
@@ -145,7 +153,7 @@ final class RolloutReader {
         case ("turn_context", _):
             if let m = payload["model"] as? String { model = m }
             if generatedEnd == nil { samplingStart = ts }
-            if !turnActive { beginTurn(at: ts) }
+            if !turnOpen { beginTurn(at: ts) }
         case ("event_msg", "task_started"):
             samplingStart = ts
             generatedEnd = nil
@@ -153,9 +161,10 @@ final class RolloutReader {
             beginTurn(at: ts)
         case ("event_msg", "user_message"):
             if generatedEnd == nil { samplingStart = ts }
-            if !turnActive { beginTurn(at: ts) }
-        case ("event_msg", "task_complete"):
-            turnActive = false
+            if !turnOpen { beginTurn(at: ts) }
+        case ("event_msg", "task_complete"), ("event_msg", "turn_aborted"):
+            turnOpen = false
+            inFlightStart = nil
         case ("response_item", _):
             if isGenerated(payload) {
                 if firstGeneratedAt == nil { firstGeneratedAt = ts }
@@ -197,7 +206,7 @@ final class RolloutReader {
     }
 
     private func beginTurn(at ts: Date) {
-        turnActive = true
+        turnOpen = true
         turnStart = ts
         turnOutput = 0
         turnGenSeconds = 0
@@ -256,10 +265,12 @@ struct OCSample {
     var createdAt: Date
     var completedAt: Date
     var ttft: Double?
+    let elapsed: Double
+    let streamSeconds: Double?
 
-    var elapsed: Double { completedAt.timeIntervalSince(createdAt) }
-    var effectiveTPS: Double { elapsed > 0 ? Double(output) / elapsed : 0 }
-    var visibleTPS: Double { elapsed > 0 ? Double(max(0, output - reasoning)) / elapsed : 0 }
+    var measurementSeconds: Double { streamSeconds ?? elapsed }
+    var effectiveTPS: Double { Double(output) / measurementSeconds }
+    var basisLabel: String { L10n.text(streamSeconds == nil ? "E2E fallback" : "Streaming") }
 }
 
 final class OpenCodeReader {
@@ -274,8 +285,8 @@ final class OpenCodeReader {
     private(set) var turnOutput: Int64 = 0
     private(set) var turnGenSeconds: Double = 0
 
-    /// 本次回复的实时速度 = 已完成调用的输出 token ÷ 这些调用的实际生成时间（不含工具执行）
-    func liveTPS(now: Date = Date()) -> Double? {
+    /// This turn uses the same per-call durations as history, without gaps between calls.
+    func liveTPS() -> Double? {
         guard inFlightStart != nil, turnOutput > 0, turnGenSeconds > 0 else { return nil }
         return Double(turnOutput) / turnGenSeconds
     }
@@ -354,14 +365,23 @@ final class OpenCodeReader {
     private func load(_ sid: String) {
         let messageTable = isV2 ? "session_message" : "message"
         let role = isV2 ? "type = 'assistant'" : "json_extract(data,'$.role') = 'assistant'"
+        // SQLite also coerces JSON strings and booleans to numbers on read. They are
+        // not valid timestamps. Read all V2 bounds from the same message, not parts.
+        func timestamp(_ key: String) -> String {
+            let path = "'$.time.\(key)'"
+            return "CASE WHEN json_type(data,\(path)) IN ('integer','real') THEN json_extract(data,\(path)) END"
+        }
         let sql = """
             SELECT id,
                    json_extract(data,'$.tokens.output'),
                    json_extract(data,'$.tokens.reasoning'),
                    json_extract(data,'$.tokens.input'),
                    coalesce(json_extract(data,'$.model.id'),json_extract(data,'$.modelID')),
-                   json_extract(data,'$.time.created'),
-                   json_extract(data,'$.time.completed')
+                   \(timestamp("created")),
+                   \(timestamp("completed")),
+                   \(isV2 ? timestamp("firstToken") : "NULL"),
+                   \(isV2 ? timestamp("streamed") : "NULL"),
+                   json_extract(data,'$.time.completed') IS NULL
             FROM \(messageTable)
             WHERE session_id = ? AND \(role)
             ORDER BY time_created DESC LIMIT 300
@@ -370,18 +390,25 @@ final class OpenCodeReader {
         var collected: [OCSample] = []
         var inflight: Date?
         while sqlite3_step(stmt) == SQLITE_ROW {
-            let created = sqlite3_column_int64(stmt, 5)
-            let completed = sqlite3_column_int64(stmt, 6)
-            guard created > 0 else { continue }
-            let createdAt = Date(timeIntervalSince1970: Double(created) / 1000)
-            if completed <= 0 {
+            let created = sqlite3_column_double(stmt, 5)
+            guard created.isFinite, created > 0 else { continue }
+            let createdAt = Date(timeIntervalSince1970: created / 1000)
+            if sqlite3_column_int(stmt, 9) != 0 {
                 let model = sqlite3_column_text(stmt, 4).map { String(cString: $0) } ?? ""
                 let age = Date().timeIntervalSince(createdAt)
                 if !model.isEmpty && age >= 0 && age < 900 && inflight == nil { inflight = createdAt }
                 continue
             }
+            let completed = sqlite3_column_double(stmt, 6)
             let output = sqlite3_column_int64(stmt, 1)
-            guard output > 0 else { continue }
+            guard output > 0, completed.isFinite, completed > created else { continue }
+            let first = sqlite3_column_double(stmt, 7)
+            let streamed = sqlite3_column_double(stmt, 8)
+            let stream = (streamed - first) / 1000
+            // Match Antigravity's minimum duration and plausible rate limits.
+            let streamTPS = stream > 0 ? Double(output) / stream : 0
+            let validStream = created <= first && streamed <= completed
+                && stream >= 0.12 && streamTPS > 0 && streamTPS <= 3000
             var sample = OCSample(
                 messageID: String(cString: sqlite3_column_text(stmt, 0)),
                 model: sqlite3_column_text(stmt, 4).map { String(cString: $0) } ?? "",
@@ -389,8 +416,10 @@ final class OpenCodeReader {
                 output: output,
                 reasoning: sqlite3_column_int64(stmt, 2),
                 createdAt: createdAt,
-                completedAt: Date(timeIntervalSince1970: Double(completed) / 1000),
-                ttft: nil
+                completedAt: Date(timeIntervalSince1970: completed / 1000),
+                ttft: created <= first && first <= completed ? (first - created) / 1000 : nil,
+                elapsed: (completed - created) / 1000,
+                streamSeconds: validStream ? stream : nil
             )
             if !isV2, let first = firstOutputTime(sample.messageID) {
                 sample.ttft = first.timeIntervalSince(createdAt)
@@ -427,7 +456,7 @@ final class OpenCodeReader {
         for s in samples where s.createdAt > boundary {
             if start == nil { start = s.createdAt }
             total += s.output
-            gen += s.elapsed
+            gen += s.measurementSeconds
         }
         turnStart = start
         turnOutput = total
@@ -459,6 +488,22 @@ final class OpenCodeReader {
     }
 
     var totalOutput: Int64 { samples.reduce(0) { $0 + $1.output } }
+
+    var summary: SpeedSummary {
+        SpeedSummary(name: SourceMode.opencode.label, active: inFlightStart != nil,
+            live: liveTPS(), last: samples.last?.effectiveTPS, completedAt: samples.last?.completedAt,
+            history: samples.map(\.effectiveTPS), model: samples.last?.model ?? "",
+            measurement: L10n.text("Completed calls: streaming speed when available, otherwise end to end. This turn combines those calls without the time between them."))
+    }
+
+    var onceLines: [String] {
+        var lines = ["session:   \(sessionID)", "responses: \(samples.count)"]
+        if let sample = samples.last {
+            lines.append("last:      \(Fmt.tps(sample.effectiveTPS)) tok/s  (\(sample.basisLabel))")
+        }
+        lines.append("live:      \(liveTPS().map { Fmt.tps($0) } ?? "-") tok/s  turn output \(turnOutput)")
+        return lines
+    }
 }
 
 // MARK: - Antigravity reader
@@ -511,25 +556,193 @@ private struct ProtoFields {
     func message(_ n: Int) -> ProtoFields? { bytes(n).flatMap(ProtoFields.init) }
     func duration(_ n: Int) -> Double? {
         guard let value = message(n) else { return nil }
-        let seconds = Double(value.integer(1) ?? 0)
+        let rawSeconds = value.integer(1) ?? 0
         let nanos = Double(value.integer(2) ?? 0)
-        guard nanos < 1_000_000_000 else { return nil }
-        return seconds + nanos / 1_000_000_000
+        guard rawSeconds <= UInt64(Int64.max), nanos < 1_000_000_000 else { return nil }
+        return Double(rawSeconds) + nanos / 1_000_000_000
+    }
+
+    func generationDuration(_ n: Int) -> Double? {
+        // Protobuf writers may omit a zero-valued duration.
+        fields.contains { $0.number == n } ? duration(n) : 0
+    }
+}
+
+struct AntigravitySample {
+    let completedAt: Date
+    let model: String
+    let output: Int64
+    let ttft: Double
+    let stream: Double
+
+    enum Basis {
+        case stream, endToEnd
+
+        var label: String {
+            switch self {
+            case .stream: return L10n.text("Streaming")
+            case .endToEnd: return L10n.text("E2E fallback")
+            }
+        }
+    }
+
+    var elapsed: Double { ttft + stream }
+    var endToEndTPS: Double { Double(output) / elapsed }
+    var measurement: (tps: Double, basis: Basis) {
+        // Check the recorded durations, not differences between rounded timestamps.
+        if stream >= 0.12 {
+            let streamingTPS = Double(output) / stream
+            if streamingTPS > 0 && streamingTPS <= 3000 { return (streamingTPS, .stream) }
+        }
+        return (endToEndTPS, .endToEnd)
+    }
+
+    var details: String {
+        L10n.text("End to end: %@ tok/s (%@) · TTFT: %@",
+            Fmt.tps(endToEndTPS), Fmt.secs(elapsed), Fmt.secs(ttft))
+    }
+}
+
+// The writer can commit repeatedly into a preallocated WAL without changing the
+// main database or WAL size. Check timestamps and identity for both files.
+private struct AntigravityDatabaseStamp: Equatable {
+    private struct FileStamp: Equatable {
+        let device: dev_t
+        let inode: ino_t
+        let size: off_t
+        let modifiedSeconds: Int
+        let modifiedNanos: Int
+        let changedSeconds: Int
+        let changedNanos: Int
+
+        init?(_ path: String) {
+            var info = stat()
+            guard stat(path, &info) == 0 else { return nil }
+            device = info.st_dev
+            inode = info.st_ino
+            size = info.st_size
+            modifiedSeconds = info.st_mtimespec.tv_sec
+            modifiedNanos = info.st_mtimespec.tv_nsec
+            changedSeconds = info.st_ctimespec.tv_sec
+            changedNanos = info.st_ctimespec.tv_nsec
+        }
+    }
+
+    private let database: FileStamp
+    private let wal: FileStamp?
+
+    var lastWrite: Date {
+        func modified(_ file: FileStamp) -> Date {
+            Date(timeIntervalSince1970: Double(file.modifiedSeconds) + Double(file.modifiedNanos) / 1e9)
+        }
+        // Opening a read-only SQLite handle can create an empty WAL. Only
+        // count a WAL with frames as evidence for which databases to inspect.
+        return max(modified(database), wal.flatMap { $0.size > 32 ? modified($0) : nil } ?? .distantPast)
+    }
+
+    init?(_ path: String) {
+        guard let database = FileStamp(path) else { return nil }
+        self.database = database
+        wal = FileStamp(path + "-wal")
+    }
+}
+
+private struct AntigravityDatabaseCache<Value> {
+    private var entry: (stamp: AntigravityDatabaseStamp, value: Value)?
+
+    mutating func read(_ path: String, load: (String) -> Value?) -> Value? {
+        let before = AntigravityDatabaseStamp(path)
+        if let entry, entry.stamp == before { return entry.value }
+        entry = nil
+        guard let before, let value = load(path) else { return nil }
+        // If a writer raced the read, revisit it next tick rather than caching
+        // a snapshot under the newer stamp. Failed reads are also retried.
+        if before == AntigravityDatabaseStamp(path) { entry = (before, value) }
+        return value
     }
 }
 
 final class AntigravityReader {
-    private(set) var samples: [Sample] = []
-    private(set) var sessionID = ""
-    private(set) var inFlightStart: Date?
-    private(set) var available = false
-    private let root: String
+    private struct Candidate { let id: String; let running: Bool }
+    private struct Step {
+        let index: Int
+        let type: Int32
+        let status: Int32
+        let start: Date?
+        let end: Date?
+        var date: Date? { end ?? start }
+        var pending: Bool { [1, 2, 8, 9, 11].contains(status) }
+    }
+    private struct Generation {
+        let sample: AntigravitySample
+        let stepIndex: Int
+        let pending: Bool
+    }
+    private struct Conversation {
+        let generations: [Generation]
+        let latestStep: Date?
+        let userStep: Step?
+        let pendingStep: Step?
+    }
+    private struct Selection {
+        let id: String
+        let path: String
+        let conversation: Conversation
+        let start: Date?
+    }
 
-    init(root: String = (NSHomeDirectory() as NSString).appendingPathComponent(".gemini/antigravity")) {
-        self.root = root
+    private(set) var samples: [AntigravitySample] = []
+    private(set) var sessionID = ""
+    private var selectedPath: String?
+    private(set) var inFlightStart: Date?
+    private(set) var inFlightMeasurement: AntigravitySample?
+    private var inFlightActivity: Date?
+    private(set) var databaseReadCount = 0
+    var available: Bool { !samples.isEmpty }
+    var activityDate: Date { inFlightActivity ?? samples.last?.completedAt ?? .distantPast }
+    var currentTPS: Double? { inFlightMeasurement?.measurement.tps }
+
+    private let roots: [String]
+    private var summaryCaches: [String: AntigravityDatabaseCache<[Candidate]>] = [:]
+    private var conversationCaches: [String: AntigravityDatabaseCache<Conversation>] = [:]
+
+    var summary: SpeedSummary {
+        SpeedSummary(name: SourceMode.antigravity.label, active: inFlightStart != nil, live: currentTPS,
+            last: samples.last?.measurement.tps, completedAt: samples.last?.completedAt,
+            history: samples.map { $0.measurement.tps }, model: samples.last?.model ?? "",
+            measurement: L10n.text("Latest recorded model-call speed, not live per-token speed."))
+    }
+
+    var onceLines: [String] {
+        var lines = ["session:   \(sessionID)", "responses: \(samples.count)", "active:    \(inFlightStart != nil)"]
+        func append(_ prefix: String, _ label: String, _ sample: AntigravitySample) {
+            let caption = L10n.text(label, sample.measurement.basis.label)
+            lines.append("\(prefix) \(Fmt.tps(sample.measurement.tps)) tok/s  (\(caption))  output \(sample.output)")
+            lines.append("details:   \(sample.details)")
+        }
+        if let sample = inFlightMeasurement {
+            append("recorded: ", "This turn · %@", sample)
+        } else if let sample = samples.last {
+            append("last:     ", "Last completed · %@", sample)
+        }
+        return lines
+    }
+
+    convenience init() {
+        let gemini = (NSHomeDirectory() as NSString).appendingPathComponent(".gemini")
+        self.init(roots: ["antigravity", "antigravity-cli", "antigravity-ide"].map { "\(gemini)/\($0)" })
+    }
+
+    convenience init(root: String) { self.init(roots: [root]) }
+
+    init(roots: [String]) {
+        var seen = Set<String>()
+        self.roots = roots.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path }
+            .filter { seen.insert($0).inserted }
     }
 
     private func open(_ path: String) -> OpaquePointer? {
+        databaseReadCount += 1
         var db: OpaquePointer?
         guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
             if db != nil { sqlite3_close_v2(db) }
@@ -546,107 +759,191 @@ final class AntigravityReader {
     }
 
     func poll(now: Date = Date()) {
-        // A transient read failure must not hide an already completed measurement.
         inFlightStart = nil
-        guard let summary = open((root as NSString).appendingPathComponent("conversation_summaries.db")) else { return }
+        inFlightMeasurement = nil
+        inFlightActivity = nil
+        var active: Selection?
+        var history: Selection?
+        var visited = Set<String>()
+        var hasCompleted = Set<String>()
+        var readFailed = false
+        func recent(_ date: Date) -> Bool {
+            let age = now.timeIntervalSince(date)
+            return age >= -2 && age < 900
+        }
+        for root in roots {
+            let path = "\(root)/conversation_summaries.db"
+            let listed = summaryCaches[root, default: .init()].read(path, load: loadCandidates)
+            if listed == nil && (AntigravityDatabaseStamp(path) != nil
+                || selectedPath?.hasPrefix("\(root)/conversations/") == true) { readFailed = true }
+            let candidates = listed ?? []
+            let directory = "\(root)/conversations"
+            // If summaries lag or do not include a conversation yet, its own
+            // recently written DB/WAL can still supply authoritative step status.
+            let files = (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []
+            let recentIDs = Set(files.compactMap { name -> String? in
+                guard name.hasSuffix(".db") else { return nil }
+                let id = String(name.dropLast(3))
+                guard UUID(uuidString: id) != nil,
+                      let stamp = AntigravityDatabaseStamp("\(directory)/\(name)"), recent(stamp.lastWrite) else { return nil }
+                return id
+            })
+            func inspect(_ id: String, running: Bool) -> Bool {
+                let path = "\(directory)/\(id).db"
+                guard visited.insert(path).inserted else { return false }
+                guard let conversation = conversationCaches[path, default: .init()].read(path, load: loadConversation) else {
+                    // Summary rows can outlive the conversation DB.
+                    if path == selectedPath || AntigravityDatabaseStamp(path) != nil { readFailed = true }
+                    return false
+                }
+                if let latest = conversation.latestStep, recent(latest), running || conversation.pendingStep != nil,
+                   latest > (active?.conversation.latestStep ?? .distantPast) {
+                    let start = conversation.userStep?.start ?? conversation.pendingStep?.start ?? latest
+                    active = Selection(id: id, path: path, conversation: conversation, start: min(now, start))
+                }
+                if let last = conversation.generations.last(where: { !$0.pending }) {
+                    hasCompleted.insert(path)
+                    if last.sample.completedAt > (history?.conversation.generations.last(where: { !$0.pending })?.sample.completedAt ?? .distantPast) {
+                        history = Selection(id: id, path: path, conversation: conversation, start: nil)
+                    }
+                    return true
+                }
+                return false
+            }
+            let listedIDs = Set(candidates.map(\.id))
+            for (index, candidate) in candidates.enumerated()
+                where index < 4 || candidate.running || recentIDs.contains(candidate.id) {
+                _ = inspect(candidate.id, running: candidate.running)
+            }
+            for id in recentIDs.subtracting(listedIDs).sorted() {
+                _ = inspect(id, running: false)
+            }
+            // Check ordered historical summaries only as far as the first one
+            // with usable samples (or one already inspected).
+            for candidate in candidates {
+                let path = "\(directory)/\(candidate.id).db"
+                if visited.contains(path) {
+                    if hasCompleted.contains(path) { break }
+                } else if inspect(candidate.id, running: candidate.running) { break }
+            }
+        }
+        conversationCaches = conversationCaches.filter { visited.contains($0.key) }
+        if let active {
+            inFlightStart = active.start
+            inFlightActivity = active.conversation.latestStep
+            if let boundary = active.conversation.userStep?.index ?? active.conversation.pendingStep?.index {
+                inFlightMeasurement = active.conversation.generations.last { $0.stepIndex >= boundary }?.sample
+            }
+            sessionID = active.id
+            selectedPath = active.path
+            samples = active.conversation.generations.filter { !$0.pending }.map(\.sample)
+        } else if let history {
+            let completed = history.conversation.generations.filter { !$0.pending }.map(\.sample)
+            if readFailed, let existing = samples.last, let fallback = completed.last,
+               existing.completedAt > fallback.completedAt { return }
+            sessionID = history.id
+            selectedPath = history.path
+            samples = completed
+        } else if !readFailed {
+            sessionID = ""
+            selectedPath = nil
+            samples = []
+        }
+    }
+
+    private func loadCandidates(_ path: String) -> [Candidate]? {
+        guard let summary = open(path) else { return nil }
         defer { sqlite3_close_v2(summary) }
         var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(summary, "SELECT conversation_id, status FROM conversation_summaries ORDER BY last_modified_time DESC LIMIT 50", -1, &statement, nil) == SQLITE_OK else { return }
+        let sql = """
+            SELECT conversation_id, status FROM conversation_summaries
+            WHERE status = 'CASCADE_RUN_STATUS_RUNNING' OR conversation_id IN
+              (SELECT conversation_id FROM conversation_summaries ORDER BY last_modified_time DESC LIMIT 50)
+            ORDER BY last_modified_time DESC
+            """
+        guard sqlite3_prepare_v2(summary, sql, -1, &statement, nil) == SQLITE_OK else { return nil }
         defer { sqlite3_finalize(statement) }
-        var candidates: [(id: String, running: Bool)] = []
+        var candidates: [Candidate] = []
         var result = sqlite3_step(statement)
         while result == SQLITE_ROW {
             if let text = sqlite3_column_text(statement, 0) {
                 let id = String(cString: text)
                 if UUID(uuidString: id) != nil {
                     let status = sqlite3_column_text(statement, 1).map { String(cString: $0) } ?? ""
-                    candidates.append((id, status == "CASCADE_RUN_STATUS_RUNNING"))
+                    candidates.append(Candidate(id: id, running: status == "CASCADE_RUN_STATUS_RUNNING"))
                 }
             }
             result = sqlite3_step(statement)
         }
-        guard result == SQLITE_DONE else { return }
-        var readFailed = false
-        for (index, candidate) in candidates.enumerated() {
-            guard let conversation = load(candidate.id) else { readFailed = true; continue }
-            // Historical fallback sessions must never appear to be generating now.
-            if index == 0, candidate.running, let latest = conversation.latestStep {
-                let age = now.timeIntervalSince(latest)
-                if age >= 0 && age < 900 { inFlightStart = latest }
-            }
-            guard !conversation.samples.isEmpty else { continue }
-            if readFailed, candidates.contains(where: { $0.id == sessionID }),
-               let previous = samples.last, let fallback = conversation.samples.last,
-               previous.completedAt > fallback.completedAt { return }
-            sessionID = candidate.id
-            samples = conversation.samples
-            available = true
-            return
-        }
-        // Only clear history after a successful read proves there are no samples.
-        if !readFailed {
-            sessionID = ""
-            samples = []
-            available = false
-        }
+        return result == SQLITE_DONE ? candidates : nil
     }
 
-    private func load(_ id: String) -> (samples: [Sample], latestStep: Date?)? {
-        let path = (root as NSString).appendingPathComponent("conversations/\(id).db")
+    private func loadConversation(_ path: String) -> Conversation? {
         guard let db = open(path) else { return nil }
         defer { sqlite3_close_v2(db) }
+        // Both queries must observe the same SQLite snapshot.
+        guard sqlite3_exec(db, "BEGIN", nil, nil, nil) == SQLITE_OK else { return nil }
 
-        var steps: [Int: Date] = [:]
+        var steps: [Int: Step] = [:]
         var stepQuery: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "SELECT idx, metadata FROM steps ORDER BY idx DESC LIMIT 1000", -1, &stepQuery, nil) == SQLITE_OK else { return nil }
+        let sql = "SELECT idx, metadata, step_type, status FROM steps ORDER BY idx DESC LIMIT 1000"
+        let legacySQL = "SELECT idx, metadata, 0, 0 FROM steps ORDER BY idx DESC LIMIT 1000"
+        guard sqlite3_prepare_v2(db, sql, -1, &stepQuery, nil) == SQLITE_OK
+                || sqlite3_prepare_v2(db, legacySQL, -1, &stepQuery, nil) == SQLITE_OK else { return nil }
+        func timestamp(_ seconds: Double?) -> Date? {
+            seconds.flatMap { $0 > 0 ? Date(timeIntervalSince1970: $0) : nil }
+        }
         var result = sqlite3_step(stepQuery)
         while result == SQLITE_ROW {
             defer { result = sqlite3_step(stepQuery) }
-            guard let data = blob(stepQuery, 1), let proto = ProtoFields(data),
-                  let time = proto.duration(7) ?? proto.duration(1), time > 0 else { continue }
-            steps[Int(sqlite3_column_int64(stepQuery, 0))] = Date(timeIntervalSince1970: time)
+            let index = Int(sqlite3_column_int64(stepQuery, 0))
+            let proto = blob(stepQuery, 1).flatMap(ProtoFields.init)
+            steps[index] = Step(index: index, type: sqlite3_column_int(stepQuery, 2), status: sqlite3_column_int(stepQuery, 3),
+                start: timestamp(proto?.duration(1)), end: timestamp(proto?.duration(7)))
         }
         sqlite3_finalize(stepQuery)
         guard result == SQLITE_DONE else { return nil }
 
         var query: OpaquePointer?
         guard sqlite3_prepare_v2(db, "SELECT data FROM gen_metadata ORDER BY idx DESC LIMIT 300", -1, &query, nil) == SQLITE_OK else { return nil }
-        var found: [Sample] = []
+        var found: [Generation] = []
         result = sqlite3_step(query)
         while result == SQLITE_ROW {
             defer { result = sqlite3_step(query) }
             guard let data = blob(query, 0), let entry = ProtoFields(data),
                   let chat = entry.message(1), let usage = chat.message(4),
                   let output = usage.integer(3), output > 0, output <= UInt64(Int64.max),
-                  let first = chat.duration(11), let stream = chat.duration(12), first + stream > 0,
-                  let indices = entry.bytes(2), let lastIndex = Self.lastPackedIndex(indices),
-                  let end = steps[lastIndex] else { continue }
-            let elapsed = first + stream
-            let reasoning = min(usage.integer(9) ?? 0, output)
-            let input = min(usage.integer(2) ?? 0, UInt64(Int64.max))
-            let cached = min(usage.integer(5) ?? 0, UInt64(Int64.max))
+                  let first = chat.generationDuration(11), let stream = chat.generationDuration(12), first + stream > 0,
+                  let packed = entry.bytes(2), let indices = Self.packedIndices(packed),
+                  let lastIndex = indices.max(), let step = steps[lastIndex], let end = step.date else { continue }
+            let modelStep = indices.compactMap { steps[$0] }.filter { $0.type == 15 }.max { $0.index < $1.index } ?? step
             let model = chat.bytes(21).flatMap { String(data: $0, encoding: .utf8) } ?? ""
-            found.append(Sample(startedAt: end.addingTimeInterval(-elapsed), completedAt: end,
-                firstOutputAt: end.addingTimeInterval(-stream), model: model, input: Int64(input),
-                cachedInput: Int64(cached), output: Int64(output), reasoning: Int64(reasoning), total: Int64(output)))
+            let sample = AntigravitySample(completedAt: end, model: model, output: Int64(output), ttft: first, stream: stream)
+            found.append(Generation(sample: sample, stepIndex: modelStep.index, pending: modelStep.pending))
         }
         sqlite3_finalize(query)
         guard result == SQLITE_DONE else { return nil }
-        return (found.sorted { $0.completedAt < $1.completedAt }, steps.values.max())
+        let userStep = steps.values.filter { $0.type == 14 }.max { $0.index < $1.index }
+        let lastClosedModel = steps.values.filter { $0.type == 15 && !$0.pending }.map(\.index).max() ?? -1
+        // Ignore open rows left behind before the current user/model step.
+        let pending = steps.values.filter { $0.type != 14 && $0.pending
+            && $0.index > max(userStep?.index ?? -1, lastClosedModel) }.max { $0.index < $1.index }
+        return Conversation(generations: found.reversed(), latestStep: steps.values.compactMap(\.date).max(),
+            userStep: userStep, pendingStep: pending)
     }
 
-    private static func lastPackedIndex(_ data: Data) -> Int? {
+    private static func packedIndices(_ data: Data) -> [Int]? {
         var value: UInt64 = 0, shift = 0
-        var last: Int?
+        var indices: [Int] = []
         for byte in data {
             guard shift <= 63, !(shift == 63 && byte > 1) else { return nil }
             value |= UInt64(byte & 0x7f) << shift
             if byte & 0x80 == 0 {
                 guard value <= UInt64(Int.max) else { return nil }
-                last = Int(value); value = 0; shift = 0
+                indices.append(Int(value)); value = 0; shift = 0
             } else { shift += 7 }
         }
-        return shift == 0 ? last : nil
+        return shift == 0 ? indices : nil
     }
 }
 
@@ -839,10 +1136,14 @@ enum StatusDisplay: String, CaseIterable {
 
     func title(active: Bool, speed: Double?, elapsed: Double) -> String {
         guard active, self != .iconOnly else { return "" }
-        if let speed, speed.isFinite, speed > 0 {
+        if let speed = Self.validSpeed(speed) {
             return Fmt.tps(speed) + (self == .speedAndUnit ? " tok/s" : "")
         }
-        return "\(Int(max(0, elapsed)))" + (self == .speedAndUnit ? " s" : "")
+        return L10n.text("%d s", Int(max(0, elapsed)))
+    }
+
+    static func validSpeed(_ value: Double?) -> Double? {
+        value.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
     }
 
     func usesLightning(active: Bool) -> Bool { !active || self == .iconOnly }
@@ -934,17 +1235,13 @@ struct SpeedSummary {
     let model: String
     let measurement: String
 
-    private func valid(_ value: Double?) -> Double? {
-        value.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
-    }
-
-    var current: Double? { active ? valid(live) : nil }
-    var value: String { (current ?? valid(last)).map(Fmt.tps) ?? "—" }
+    var current: Double? { active ? StatusDisplay.validSpeed(live) : nil }
+    var value: String { (current ?? StatusDisplay.validSpeed(last)).map(Fmt.tps) ?? "—" }
     var recent: [Double] { Array(history.filter { $0.isFinite && $0 > 0 }.suffix(12)) }
 
     func caption(now: Date = Date()) -> String {
         if current != nil { return L10n.text("This turn") }
-        guard valid(last) != nil else { return active ? L10n.text("Waiting for data") : L10n.text("No data") }
+        guard StatusDisplay.validSpeed(last) != nil else { return active ? L10n.text("Waiting for data") : L10n.text("No data") }
         guard let date = completedAt else { return L10n.text("Last call") }
         let age = max(0, now.timeIntervalSince(date))
         let time: String
@@ -1309,7 +1606,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             (.codex, isCodexGenerating, max(reader.samples.last?.completedAt ?? .distantPast, reader.turnActive ? (reader.turnStart ?? .distantPast) : .distantPast)),
             (.opencode, isOpenCodeGenerating, max(oc.samples.last?.completedAt ?? .distantPast, oc.inFlightStart ?? .distantPast)),
             (.claude, claude.inFlightStart != nil, max(claude.samples.last?.completedAt ?? .distantPast, claude.inFlightStart ?? .distantPast)),
-            (.antigravity, antigravity.inFlightStart != nil, antigravity.available ? max(antigravity.samples.last?.completedAt ?? .distantPast, antigravity.inFlightStart ?? .distantPast) : .distantPast),
+            (.antigravity, antigravity.inFlightStart != nil, antigravity.activityDate),
             (.hermes, false, hermes.samples.last?.completedAt ?? .distantPast),
             (.cursor, cursor.inFlightStart != nil, max(cursor.samples.last?.completedAt ?? .distantPast, cursor.inFlightStart ?? .distantPast))
         ]
@@ -1343,8 +1640,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         print("selftest: opencode=\(oc.samples.count) last=\(oc.samples.last.map { Fmt.tps($0.effectiveTPS) } ?? "-") session=\(oc.sessionID)")
         print("selftest: claude=\(claude.samples.count) last=\(claude.samples.last.map { Fmt.tps($0.effectiveTPS) } ?? "-") session=\(claude.sessionID)")
         print("selftest: claude live=\(claude.liveTPS().map { Fmt.tps($0) } ?? "-") turnOut=\(claude.turnOutput)")
-        print("selftest: antigravity=\(antigravity.samples.count) last=\(antigravity.samples.last.map { Fmt.tps($0.effectiveTPS) } ?? "-") session=\(antigravity.sessionID)")
-        print("selftest: hermes=\(hermes.samples.count) last=\(hermes.samples.last.map { Fmt.tps($0.effectiveTPS) } ?? "-")")
+        print("selftest: antigravity=\(antigravity.samples.count) last=\(antigravity.samples.last.map { Fmt.tps($0.measurement.tps) } ?? "-") session=\(antigravity.sessionID)")
+        print("selftest: hermes=\(hermes.samples.count) last=\(hermes.samples.last.map { Fmt.tps(HermesReader.speed($0)) } ?? "-")")
         print("selftest: cursor=\(cursor.samples.count) last=\(cursor.samples.last.map { Fmt.tps($0.effectiveTPS) } ?? "-") active=\(cursor.inFlightStart != nil)")
         print("selftest: generating codex=\(isCodexGenerating) opencode=\(isOpenCodeGenerating)")
         print("selftest: live codex=\(reader.liveTPS().map { Fmt.tps($0) } ?? "-") turnOut=\(reader.turnOutput) opencode=\(oc.liveTPS().map { Fmt.tps($0) } ?? "-") turnOut=\(oc.turnOutput)")
@@ -1363,11 +1660,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             installedSources = detectInstalledTools()
             if installedSources.contains(.codex), let url = CodexHome.newestRollout() { reader.read(url) }
             if installedSources.contains(.claude) { claude.poll() }
-            if installedSources.contains(.antigravity) { antigravity.poll() }
             if installedSources.contains(.hermes) { hermes.poll() }
         } else if installedSources.contains(.codex), !reader.path.isEmpty {
             reader.read(URL(fileURLWithPath: reader.path))
         }
+        if installedSources.contains(.antigravity) { antigravity.poll() }
         if installedSources.contains(.cursor) {
             if !cursorHookReady, Date().timeIntervalSince(lastCursorHookAttempt) > 60 {
                 lastCursorHookAttempt = Date()
@@ -1412,7 +1709,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .codex: return reader.liveTPS()
         case .auto: return nil
         case .claude: return claude.liveTPS()
-        case .antigravity: return nil
+        case .antigravity: return antigravity.currentTPS
         case .cursor: return nil
         case .hermes: return nil
         }
@@ -1459,7 +1756,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             button.toolTip = L10n.text("No tools installed")
         } else if !active {
             button.toolTip = L10n.text("%@ is idle. Open the menu for speed history.", source.label)
-        } else if let speed {
+        } else if source == .antigravity, let speed = StatusDisplay.validSpeed(speed) {
+            button.toolTip = L10n.text("%@: latest recorded model call, %@ tok/s", source.label, Fmt.tps(speed))
+        } else if let speed = StatusDisplay.validSpeed(speed) {
             button.toolTip = L10n.text("%@: %@ tok/s this turn (%d s elapsed)", source.label, Fmt.tps(speed), Int(elapsed))
         } else {
             button.toolTip = L10n.text("%@ is generating (%d s elapsed)", source.label, Int(elapsed))
@@ -1585,31 +1884,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func updateSummaryItems() {
-        func update(_ source: SourceMode, active: Bool, live: Double?, last: Double?,
-                    completed: Date?, history: [Double], model: String, measurement: String) {
+        func apply(_ source: SourceMode, _ summary: SpeedSummary) {
             guard let item = summaryItems[source] else { return }
-            let summary = SpeedSummary(name: source.label, active: active, live: live, last: last,
-                completedAt: completed, history: history, model: model, measurement: measurement)
             item.title = "\(summary.name) · \(summary.caption()) · \(summary.value) tok/s"
             (item.view as? SummaryMenuView)?.update(summary)
+        }
+        func update(_ source: SourceMode, active: Bool, live: Double?, last: Double?,
+                    completed: Date?, history: [Double], model: String, measurement: String) {
+            apply(source, SpeedSummary(name: source.label, active: active, live: live, last: last,
+                completedAt: completed, history: history, model: model, measurement: measurement))
         }
         let cumulative = L10n.text("This turn: output tokens / total completed-call duration, excluding tool execution; not instantaneous per-token speed.")
         update(.codex, active: isCodexGenerating, live: reader.liveTPS(), last: reader.samples.last?.effectiveTPS,
             completed: reader.samples.last?.completedAt, history: reader.samples.map(\.effectiveTPS), model: reader.model, measurement: cumulative)
-        update(.opencode, active: isOpenCodeGenerating, live: oc.liveTPS(), last: oc.samples.last?.effectiveTPS,
-            completed: oc.samples.last?.completedAt, history: oc.samples.map(\.effectiveTPS), model: oc.samples.last?.model ?? "", measurement: cumulative)
+        if summaryItems[.opencode] != nil { apply(.opencode, oc.summary) }
         update(.claude, active: claude.inFlightStart != nil, live: claude.liveTPS(), last: claude.samples.last?.effectiveTPS,
             completed: claude.samples.last?.completedAt, history: claude.samples.map(\.effectiveTPS), model: claude.samples.last?.model ?? "", measurement: cumulative + "\n" + L10n.text("Claude measures from request start to the first complete output block, including time to first token."))
-        update(.antigravity, active: antigravity.inFlightStart != nil, live: nil,
-            last: antigravity.available ? antigravity.samples.last?.effectiveTPS : nil,
-            completed: antigravity.samples.last?.completedAt,
-            history: antigravity.available ? antigravity.samples.map(\.effectiveTPS) : [],
-            model: antigravity.samples.last?.model ?? "",
-            measurement: L10n.text("Last call: output tokens / (time to first token + streaming duration); updated after completion."))
-        update(.hermes, active: false, live: nil, last: hermes.samples.last?.effectiveTPS,
-            completed: hermes.samples.last?.completedAt, history: hermes.samples.map(\.effectiveTPS),
+        if summaryItems[.antigravity] != nil { apply(.antigravity, antigravity.summary) }
+        update(.hermes, active: false, live: nil, last: hermes.samples.last.map(HermesReader.speed),
+            completed: hermes.samples.last?.completedAt, history: hermes.samples.map(HermesReader.speed),
             model: hermes.samples.last?.model ?? "",
-            measurement: L10n.text("Last call: output tokens / logged API latency (rounded to 0.1 s); updated after completion. No live generation state."))
+            measurement: hermes.latestBasis == .stream
+                ? L10n.text("Last call: estimated stream speed (first chunk to API completion).")
+                : L10n.text("Last call: output tokens / full API time."))
         update(.cursor, active: cursor.inFlightStart != nil, live: nil, last: cursor.samples.last?.effectiveTPS,
             completed: cursor.samples.last?.completedAt, history: cursor.samples.map(\.effectiveTPS),
             model: cursor.samples.last?.model ?? cursor.inFlightModel,
@@ -1721,8 +2018,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             precondition(currentSymbol == (choice == .iconOnly ? "bolt.fill" : "logo-opencode"))
             precondition(statusItem.button?.image?.isTemplate == true)
             renderStatus(source: .opencode, active: true, speed: nil, elapsed: 8)
-            let waiting = choice.title(active: true, speed: nil, elapsed: 8)
+            let waiting = choice == .iconOnly ? "" : L10n.text("%d s", 8)
             precondition(statusItem.button?.attributedTitle.string == (waiting.isEmpty ? "" : " " + waiting))
+            renderStatus(source: .antigravity, active: true, speed: 200, elapsed: 8)
+            let recorded = choice.title(active: true, speed: 200, elapsed: 8)
+            precondition(statusItem.button?.attributedTitle.string == (recorded.isEmpty ? "" : " " + recorded))
+            precondition(statusItem.button?.toolTip == L10n.text("%@: latest recorded model call, %@ tok/s", SourceMode.antigravity.label, "200.0"))
             renderStatus(source: .opencode, active: false, speed: nil, elapsed: 0)
             precondition(statusItem.button?.title == "" && currentSymbol == "bolt.fill")
         }
@@ -1800,11 +2101,17 @@ func runOnce() -> Int32 {
         let reader = HermesReader()
         reader.poll()
         print("samples:   \(reader.samples.count)")
-        if let sample = reader.samples.last {
+        if let sample = reader.samples.last, let basis = reader.latestBasis {
             print("model:     \(sample.model)")
             print("output:    \(sample.output)")
+            print("basis:     \(basis.rawValue)")
             print("elapsed:   \(Fmt.secs(sample.elapsed))")
-            print("speed:     \(Fmt.tps(sample.effectiveTPS)) tok/s")
+            if let first = sample.firstOutputAt, let wait = sample.ttft {
+                print("TTFC:      \(Fmt.secs(wait))")
+                print("stream:    \(Fmt.secs(sample.completedAt.timeIntervalSince(first)))")
+                print("E2E speed: \(Fmt.tps(sample.effectiveTPS)) tok/s")
+            }
+            print("speed:     \(Fmt.tps(HermesReader.speed(sample))) tok/s")
         }
         return 0
     }
@@ -1814,22 +2121,15 @@ func runOnce() -> Int32 {
         let dbPath = dbIndex.flatMap { $0 + 1 < CommandLine.arguments.count ? CommandLine.arguments[$0 + 1] : nil } ?? OpenCodeReader.dbPath
         let reader = OpenCodeReader(dbPath: dbPath)
         reader.poll()
-        print("session:   \(reader.sessionID)")
-        print("responses: \(reader.samples.count)")
-        if let sample = reader.samples.last { print("last:      \(Fmt.tps(sample.effectiveTPS)) tok/s") }
-        print("live:      \(reader.liveTPS().map { Fmt.tps($0) } ?? "-") tok/s  turn output \(reader.turnOutput)")
+        reader.onceLines.forEach { print($0) }
         return reader.sessionID.isEmpty ? 1 : 0
     }
     if let idx = CommandLine.arguments.firstIndex(of: "--source"), idx + 1 < CommandLine.arguments.count,
        CommandLine.arguments[idx + 1] == "antigravity" {
         let reader = AntigravityReader()
         reader.poll()
-        print("session:   \(reader.sessionID)")
-        print("responses: \(reader.samples.count)")
-        if let sample = reader.samples.last {
-            print("last:      \(Fmt.tps(sample.effectiveTPS)) tok/s  elapsed \(Fmt.secs(sample.elapsed))  output \(sample.output)")
-        }
-        return reader.available ? 0 : 1
+        reader.onceLines.forEach { print($0) }
+        return reader.available || reader.inFlightStart != nil ? 0 : 1
     }
     if let idx = CommandLine.arguments.firstIndex(of: "--source"), idx + 1 < CommandLine.arguments.count,
        CommandLine.arguments[idx + 1] == "claude" {
@@ -1898,7 +2198,13 @@ func testRolloutIncrementalRead() throws {
     precondition(reader.samples[0].effectiveTPS == 50)
     reader.read(file)
     precondition(reader.samples.count == 1, "Repeated polling must not duplicate samples")
-    print("rollout tests: passed (partial-line writes and repeat poll)")
+    let clock = Date(timeIntervalSince1970: 1767225604)
+    precondition(reader.liveTPS(now: clock) == 50)
+    precondition(!reader.isActive(at: clock.addingTimeInterval(901)))
+    try writer.write(contentsOf: Data("{\"timestamp\":\"2026-01-01T00:00:04.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"turn_aborted\"}}\n".utf8))
+    reader.read(file)
+    precondition(reader.liveTPS(now: clock) == nil && !reader.isActive(at: clock) && reader.samples.count == 1)
+    print("rollout tests: passed (partial writes, repeat poll, stale and aborted turns)")
 }
 
 func testPanel(previewDirectory: String?) throws {
@@ -1906,6 +2212,7 @@ func testPanel(previewDirectory: String?) throws {
     try testHermesReader()
     try testCursorReader()
     try testAntigravityReader()
+    try testOpenCodeReader()
     try testInstalledTools()
     testPresentationPreferences()
     if Bundle.main.bundleURL.pathExtension == "app" {
@@ -1932,7 +2239,7 @@ func testPanel(previewDirectory: String?) throws {
         card.update(summary())
         precondition(card.toolTip == nil, "Hovering a tool card must not show detail text")
         let logo = card.subviews.compactMap { $0 as? NSImageView }.first!
-        let text = card.subviews.compactMap { $0 as? NSTextField }.filter { $0.frame.minX == 40 }
+        let text = card.subviews.compactMap { $0 as? NSTextField }.filter { !$0.isHidden && $0.frame.minX == 40 }
         precondition(text.count == 2)
         let textBounds = text[0].frame.union(text[1].frame)
         precondition(abs(logo.frame.midY - textBounds.midY) < 0.001, "Logo must center on both text lines")
@@ -2060,7 +2367,7 @@ func testPresentationPreferences() {
             let hidden = !active || display == .iconOnly
             precondition(display.usesLightning(active: active) == hidden)
             precondition(display.title(active: active, speed: 46.1, elapsed: 8) == (hidden ? "" : display == .speedAndUnit ? "46.1 tok/s" : "46.1"))
-            precondition(display.title(active: active, speed: nil, elapsed: 8) == (hidden ? "" : display == .speedAndUnit ? "8 s" : "8"))
+            precondition(display.title(active: active, speed: nil, elapsed: 8) == (hidden ? "" : L10n.text("%d s", 8)))
         }
     }
     let now = Date()
@@ -2155,10 +2462,25 @@ func testInstalledTools() throws {
     try fm.createDirectory(at: trashed.deletingLastPathComponent(), withIntermediateDirectories: true)
     try fm.moveItem(at: moved, to: trashed)
     precondition(!detect(app: trashed).contains(.antigravity))
+    try write(".local/bin/agy", executable: true)
+    precondition(detect().contains(.antigravity), "Finder-launched TokSpeed must detect an agy CLI-only install")
     print("installation detection tests: passed (CLI/PATH/Finder/NVM/desktop/Launch Services/trash/stale logs)")
 }
 
 let args = CommandLine.arguments
+if args.contains("--install-hermes-plugin") {
+    do {
+        let destination = try HermesPluginInstaller.install()
+        print("Hermes plugin files: \(destination.path)")
+        print("Enable in the same Hermes profile: hermes plugins enable \(HermesReader.pluginName)")
+        print("If Hermes did not reload plugins, start a new process or reload the gateway before collecting data.")
+        print("Log: \(HermesReader.logURL(home: HermesReader.home()).path)")
+        exit(0)
+    } catch {
+        fputs("Hermes plugin: \(error.localizedDescription)\n", stderr)
+        exit(1)
+    }
+}
 if args.contains("--install-cursor-hook") || args.contains("--uninstall-cursor-hook") {
     let status = args.contains("--uninstall-cursor-hook")
         ? CursorHookInstaller.remove()

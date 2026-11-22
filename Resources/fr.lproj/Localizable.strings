@@ -30,6 +30,15 @@
 "Move down" = "Descendre";
 "This turn: output tokens / total completed-call duration, excluding tool execution; not instantaneous per-token speed." = "Cette réponse : tokens de sortie / durée totale des appels terminés, hors exécution des outils ; pas une vitesse instantanée par token.";
 "Claude measures from request start to the first complete output block, including time to first token." = "Claude mesure du début de la requête au premier bloc de sortie complet, délai du premier token inclus.";
-"Last call: output tokens / (time to first token + streaming duration); updated after completion." = "Dernier appel : tokens de sortie / (délai du premier token + durée du streaming) ; mise à jour après la fin.";
-"Last call: output tokens / logged API latency (rounded to 0.1 s); updated after completion. No live generation state." = "Dernier appel : tokens de sortie / durée API journalisée (arrondie à 0,1 s) ; mis à jour après la fin. Aucun état de génération en direct.";
+"%d s" = "%d s";
+"Streaming" = "Streaming";
+"E2E fallback" = "Repli E2E";
+"Last completed · %@" = "Dernier appel terminé · %@";
+"This turn · %@" = "Tour en cours · %@";
+"Latest recorded model-call speed, not live per-token speed." = "Dernier débit d’appel du modèle enregistré, pas un débit en temps réel jeton par jeton.";
+"%@: latest recorded model call, %@ tok/s" = "%@ : dernier appel du modèle enregistré, %@ tok/s";
+"End to end: %@ tok/s (%@) · TTFT: %@" = "Bout en bout : %@ tok/s (%@) · TTFT : %@";
+"Last call: estimated stream speed (first chunk to API completion)." = "Dernier appel : débit estimé du flux (du premier fragment à la fin de l’appel API).";
+"Last call: output tokens / full API time." = "Dernier appel : tokens de sortie / durée totale de l’appel API.";
 "Cursor hook: last completed turn. Recorded output tokens / whole-turn time from prompt submit to loop stop, including thinking, tools and waiting; not pure model generation speed. While a turn runs, the menu bar shows elapsed time only." = "Cursor hook : dernier tour terminé. Tokens de sortie enregistrés / durée totale, de la soumission de l’invite à l’arrêt de la boucle, réflexion, outils et attentes comprises ; ce n’est pas la vitesse de génération pure du modèle. Pendant un tour, la barre de menus affiche uniquement le temps écoulé.";
+"Completed calls: streaming speed when available, otherwise end to end. This turn combines those calls without the time between them." = "Appels terminés : vitesse de génération en flux si disponible, sinon de bout en bout. Le calcul du tour exclut le temps entre les appels.";

@@ -20,7 +20,7 @@ func testHermesReader() throws {
     let first = line()
     try write(first)
     reader.poll()
-    precondition(reader.sessionID == "session-a" && reader.samples.count == 1)
+    precondition(reader.sessionID == HermesReader.digest("session-a") && reader.samples.count == 1)
     precondition(reader.samples[0].effectiveTPS == 50 && reader.samples[0].model == "test")
     reader.poll()
     precondition(reader.samples.count == 1, "Unchanged logs must not duplicate calls")
@@ -49,11 +49,11 @@ func testHermesReader() throws {
     precondition(reader.samples.count == 3)
     try write(line("12:00:08", session: "session-b", output: "80", latency: "4.0"))
     reader.poll()
-    precondition(reader.sessionID == "session-b" && reader.samples.count == 1 && reader.samples[0].effectiveTPS == 20,
+    precondition(reader.sessionID == HermesReader.digest("session-b") && reader.samples.count == 1 && reader.samples[0].effectiveTPS == 20,
         "Concurrent sessions must not blend their histories")
     try write("")
     reader.poll()
-    precondition(reader.sessionID == "session-a" && reader.samples.count == 2, "Retain rotated history when the active log is empty")
+    precondition(reader.sessionID == HermesReader.digest("session-a") && reader.samples.count == 2, "Retain rotated history when the active log is empty")
     try fm.removeItem(at: logs.appendingPathComponent("agent.log.1"))
     try write(line(session: "", model: ""))
     reader.poll()

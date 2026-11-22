@@ -1,0 +1,3 @@
+name: tokspeed-metrics
+version: "1.0.0"
+description: Local per-call timing and token counts for TokSpeed; no message content or network.

@@ -40,6 +40,7 @@ enum InstalledTools {
         return Set(ToolOrder.popular.filter { source in
             let command = source == .claude ? "claude" : source.rawValue
             if Set(directories).contains(where: { executable(($0 as NSString).appendingPathComponent(command)) }) { return true }
+            if source == .antigravity && Set(directories).contains(where: { executable(($0 as NSString).appendingPathComponent("agy")) }) { return true }
             guard let app = applications[source] else { return false }
             if let url = applicationURL(app.id), installedApp(url) { return true }
             return (applicationDirectories ?? ["/Applications", (home as NSString).appendingPathComponent("Applications")]).contains { root in

@@ -30,6 +30,15 @@
 "Move down" = "下に移動";
 "This turn: output tokens / total completed-call duration, excluding tool execution; not instantaneous per-token speed." = "今回：出力トークン数 ÷ 完了した呼び出しの合計時間。ツール実行時間は除外し、トークン単位の瞬間速度ではありません。";
 "Claude measures from request start to the first complete output block, including time to first token." = "Claude はリクエスト開始から最初の完全な出力ブロックまでを計測し、最初のトークンの待ち時間を含みます。";
-"Last call: output tokens / (time to first token + streaming duration); updated after completion." = "前回：出力トークン数 ÷（最初のトークンの待ち時間 + ストリーミング時間）。完了後に更新します。";
-"Last call: output tokens / logged API latency (rounded to 0.1 s); updated after completion. No live generation state." = "前回の呼び出し：出力トークン数 ÷ ログの API 所要時間（0.1 秒単位）。完了後に更新。生成中の状態表示はありません。";
+"%d s" = "%d s";
+"Streaming" = "ストリーミング";
+"E2E fallback" = "代替：E2E";
+"Last completed · %@" = "直近の完了 · %@";
+"This turn · %@" = "今回 · %@";
+"Latest recorded model-call speed, not live per-token speed." = "直近に記録されたモデル呼び出しの速度です。トークン単位のリアルタイム速度ではありません。";
+"%@: latest recorded model call, %@ tok/s" = "%@：直近に記録されたモデル呼び出し、%@ tok/s";
+"End to end: %@ tok/s (%@) · TTFT: %@" = "E2E：%@ tok/s（%@）· 初回トークン待ち：%@";
+"Last call: estimated stream speed (first chunk to API completion)." = "前回の呼び出し：推定ストリーミング速度（最初のチャンクから API の完了まで）。";
+"Last call: output tokens / full API time." = "前回の呼び出し：出力トークン数 ÷ API の総所要時間。";
 "Cursor hook: last completed turn. Recorded output tokens / whole-turn time from prompt submit to loop stop, including thinking, tools and waiting; not pure model generation speed. While a turn runs, the menu bar shows elapsed time only." = "Cursor Hook：完了した最後のターン。記録された出力トークン数 ÷ プロンプト送信からループ終了までの全体時間（思考・ツール・待機時間を含む。これは純粋なモデル生成速度ではない）。実行中はメニューバーに経過時間だけ表示。";
+"Completed calls: streaming speed when available, otherwise end to end. This turn combines those calls without the time between them." = "完了した呼び出しのストリーミング速度を表示します。計測できない場合は開始から完了までで算出します。このターンの速度に呼び出し間の時間は含まれません。";

@@ -30,6 +30,15 @@
 "Move down" = "Bajar";
 "This turn: output tokens / total completed-call duration, excluding tool execution; not instantaneous per-token speed." = "Esta respuesta: tokens de salida / duración total de las llamadas completadas, sin ejecución de herramientas; no es velocidad instantánea por token.";
 "Claude measures from request start to the first complete output block, including time to first token." = "Claude mide desde el inicio de la solicitud hasta el primer bloque de salida completo, incluida la espera del primer token.";
-"Last call: output tokens / (time to first token + streaming duration); updated after completion." = "Última llamada: tokens de salida / (espera del primer token + duración del streaming); se actualiza al terminar.";
-"Last call: output tokens / logged API latency (rounded to 0.1 s); updated after completion. No live generation state." = "Última llamada: tokens de salida / duración API registrada (redondeada a 0,1 s); se actualiza al finalizar. Sin estado de generación en vivo.";
+"%d s" = "%d s";
+"Streaming" = "Generación en flujo";
+"E2E fallback" = "Alternativa E2E";
+"Last completed · %@" = "Última completada · %@";
+"This turn · %@" = "Este turno · %@";
+"Latest recorded model-call speed, not live per-token speed." = "Última velocidad registrada de una llamada al modelo, no una medición en directo token a token.";
+"%@: latest recorded model call, %@ tok/s" = "%@: última llamada al modelo registrada, %@ tok/s";
+"End to end: %@ tok/s (%@) · TTFT: %@" = "De extremo a extremo: %@ tok/s (%@) · TTFT: %@";
+"Last call: estimated stream speed (first chunk to API completion)." = "Última llamada: velocidad estimada del flujo (del primer fragmento al fin de la llamada).";
+"Last call: output tokens / full API time." = "Última llamada: tokens de salida / duración total de la llamada a la API.";
 "Cursor hook: last completed turn. Recorded output tokens / whole-turn time from prompt submit to loop stop, including thinking, tools and waiting; not pure model generation speed. While a turn runs, the menu bar shows elapsed time only." = "Cursor hook: último turno completado. Tokens de salida registrados / duración total, del envío del prompt al final del bucle, incluidos razonamiento, herramientas y esperas; no es velocidad pura del modelo. Durante un turno, la barra de menús muestra solo el tiempo transcurrido.";
+"Completed calls: streaming speed when available, otherwise end to end. This turn combines those calls without the time between them." = "Llamadas completadas: velocidad de generación en directo cuando está disponible; si no, de extremo a extremo. El cálculo del turno excluye el tiempo entre llamadas.";

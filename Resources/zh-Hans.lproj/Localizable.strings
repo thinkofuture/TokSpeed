@@ -30,6 +30,15 @@
 "Move down" = "下移";
 "This turn: output tokens / total completed-call duration, excluding tool execution; not instantaneous per-token speed." = "本轮：已完成调用的输出 token ÷ 调用耗时之和，不含工具执行；非逐 token 瞬时速度。";
 "Claude measures from request start to the first complete output block, including time to first token." = "Claude 按请求开始到首个完整输出块计时，含首 token 延迟。";
-"Last call: output tokens / (time to first token + streaming duration); updated after completion." = "上次调用：输出 token ÷（首 token 延迟 + 流式生成时长）；调用完成后更新。";
-"Last call: output tokens / logged API latency (rounded to 0.1 s); updated after completion. No live generation state." = "上次调用：输出 token ÷ 日志中的 API 耗时（精度 0.1 秒）；完成后更新，不显示实时生成状态。";
+"%d s" = "%d s";
+"Streaming" = "流式速度";
+"E2E fallback" = "端到端回退";
+"Last completed · %@" = "最近已完成 · %@";
+"This turn · %@" = "本轮 · %@";
+"Latest recorded model-call speed, not live per-token speed." = "最近记录的模型调用速度，不是逐 token 实时速度。";
+"%@: latest recorded model call, %@ tok/s" = "%@：最近记录的模型调用，%@ tok/s";
+"End to end: %@ tok/s (%@) · TTFT: %@" = "端到端：%@ tok/s（%@）· 首 token 延迟：%@";
+"Last call: estimated stream speed (first chunk to API completion)." = "上次调用：估算流式均速（从首块到 API 调用完成）。";
+"Last call: output tokens / full API time." = "上次调用：输出 token ÷ API 调用总耗时。";
 "Cursor hook: last completed turn. Recorded output tokens / whole-turn time from prompt submit to loop stop, including thinking, tools and waiting; not pure model generation speed. While a turn runs, the menu bar shows elapsed time only." = "Cursor Hook：上一轮已完成回合。记录的输出 token 数 ÷ 从提交提示到循环停止的整轮时间（包括思考、工具和等待），不是纯模型生成速度。运行期间菜单栏仅显示经过时间。";
+"Completed calls: streaming speed when available, otherwise end to end. This turn combines those calls without the time between them." = "已完成调用优先采用流式速度，否则使用端到端速度。本轮速度不计入调用之间的时间。";
