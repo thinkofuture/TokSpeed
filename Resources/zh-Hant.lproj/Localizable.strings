@@ -13,7 +13,13 @@
 "%d h ago" = "%d 小時前";
 "%d d ago" = "%d 天前";
 "Last · %@" = "上次 · %@";
-"Trend: last %d calls, independent scale; not per-second data." = "趨勢：最近 %d 次呼叫，獨立縱軸；非逐秒資料。";
+"Recent completed calls" = "近期已完成的呼叫";
+"No completed calls yet" = "還沒有已完成的呼叫";
+"Bright lines share a completion-time scale. Faint lines show each idle tool’s own recent history, not the same times. All lines share a speed scale. Long gaps are not connected." = "亮線依呼叫完成時間共用橫軸。淡線依各閒置來源自己的相對時間顯示近期記錄，不能用來比較事件是否同時發生。所有曲線共用速度刻度，長時間沒有資料時不連線。";
+"Live" = "即時";
+"Last" = "上次";
+"Recorded" = "已測";
+"%@, %@, %@" = "%@，%@，%@";
 "Active" = "活躍";
 "Idle" = "閒置";
 "%@, %@, %@, %@ tokens per second" = "%@，%@，%@，每秒 %@ tokens";
@@ -26,8 +32,8 @@
 "Settings" = "設定";
 "Source" = "來源";
 "Drag to reorder" = "拖曳以調整順序";
-"Move up" = "上移";
-"Move down" = "下移";
+"Move left" = "左移";
+"Move right" = "右移";
 "This turn: output tokens / total completed-call duration, excluding tool execution; not instantaneous per-token speed." = "本輪：已完成呼叫的輸出 token ÷ 呼叫耗時總和，不含工具執行；非逐 token 瞬時速度。";
 "Claude measures from request start to the first complete output block, including time to first token." = "Claude 從請求開始計時至首個完整輸出區塊，包含首 token 延遲。";
 "%d s" = "%d s";
@@ -42,3 +48,10 @@
 "Last call: output tokens / full API time." = "上次呼叫：輸出 token ÷ API 呼叫總耗時。";
 "Cursor hook: last completed turn. Recorded output tokens / whole-turn time from prompt submit to loop stop, including thinking, tools and waiting; not pure model generation speed. While a turn runs, the menu bar shows elapsed time only." = "Cursor Hook：上一輪已完成回合。記錄的輸出 token 數 ÷ 從提交提示到迴圈停止的整輪時間（包括思考、工具和等待），不是純模型生成速度。執行期間選單列僅顯示經過時間。";
 "Completed calls: streaming speed when available, otherwise end to end. This turn combines those calls without the time between them." = "已完成的呼叫優先採用串流速度，否則使用端對端速度。本輪速度不計入呼叫之間的時間。";
+"%@ · %@ · %@ tok/s" = "%@ · %@ · 每秒 %@ 個 token";
+"Panel view" = "面板檢視";
+"Combined chart" = "橫幅總覽";
+"Per-agent list" = "經典列表";
+"Move up" = "上移";
+"Move down" = "下移";
+"T3 Code: last completed turn. Output tokens / full turn duration, including tools and waiting." = "T3 Code：上一輪已完成回合。輸出 token 數 ÷ 整輪時長（包括工具和等待）。";

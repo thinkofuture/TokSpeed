@@ -73,9 +73,10 @@ func testOpenCodeReader() throws {
     precondition(samples["awaiting-completion"] == nil && reader.inFlightStart != nil)
     precondition(reader.turnOutput == 300 && reader.turnGenSeconds == 5 && reader.liveTPS() == 60,
         "This turn must divide total tokens by summed measured durations, without inter-call time")
-    precondition(reader.summary.current == 60 && Array(reader.summary.recent.suffix(2)) == [100, 50])
-    precondition(reader.onceLines.contains("last:      50.0 tok/s  (\(L10n.text("E2E fallback")))"))
-    precondition(reader.onceLines.contains("live:      60.0 tok/s  turn output 300"))
+    precondition(reader.summary.current == 60 && reader.summary.recent.suffix(2).map(\.speed) == [100, 50])
+    precondition(reader.summary.recent.map(\.completedAt) == reader.samples.map(\.completedAt))
+    precondition(reader.onceLines.contains("last:      50 tok/s  (\(L10n.text("E2E fallback")))"))
+    precondition(reader.onceLines.contains("live:      60 tok/s  turn output 300"))
 
     try sql(v2, """
         UPDATE session_message SET data = json_set(data, '$.time.completed', \(epoch + 106000))
@@ -83,8 +84,8 @@ func testOpenCodeReader() throws {
         """)
     reader.poll()
     precondition(reader.inFlightStart == nil && reader.liveTPS() == nil && reader.summary.current == nil)
-    precondition(reader.samples.last?.effectiveTPS == 900 && reader.summary.recent.last == 900)
-    precondition(reader.onceLines.contains("last:      900.0 tok/s  (\(L10n.text("Streaming")))"))
+    precondition(reader.samples.last?.effectiveTPS == 900 && reader.summary.recent.last?.speed == 900)
+    precondition(reader.onceLines.contains("last:      900 tok/s  (\(L10n.text("Streaming")))"))
 
     let v1 = root.appendingPathComponent("v1.db")
     try sql(v1, """
@@ -103,6 +104,6 @@ func testOpenCodeReader() throws {
     let old = legacy.samples[0]
     precondition(old.model == "legacy" && old.streamSeconds == nil && old.effectiveTPS == 40)
     precondition(abs((old.ttft ?? 0) - 1) < 0.000_001, "Keep legacy TTFT without using it for speed")
-    precondition(legacy.summary.recent == [40] && legacy.turnGenSeconds == 3)
+    precondition(legacy.summary.recent.map(\.speed) == [40] && legacy.turnGenSeconds == 3)
     print("OpenCode tests: passed (same-row timing, fallback, cleanup, weighted turn, V1)")
 }

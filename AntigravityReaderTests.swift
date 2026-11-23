@@ -104,7 +104,7 @@ func testAntigravityReader() throws {
     try exec(summaryWriter, "PRAGMA journal_mode=WAL; INSERT INTO conversation_summaries VALUES ('\(new)', 'CASCADE_RUN_STATUS_IDLE', 1);")
     try exec(conversationWriter, "PRAGMA journal_mode=WAL; DELETE FROM gen_metadata; INSERT INTO gen_metadata VALUES (0, \(generation(100)));")
     reader.poll(now: now)
-    precondition(reader.summary.value == "100.0" && reader.inFlightStart == nil)
+    precondition(reader.summary.value == "100" && reader.inFlightStart == nil)
     let walReads = reader.databaseReadCount
     reader.poll(now: now)
     precondition(reader.databaseReadCount == walReads)
@@ -133,9 +133,9 @@ func testAntigravityReader() throws {
     precondition(reader.inFlightStart == now && reader.databaseReadCount == walReads + 2)
     precondition(reader.samples.map(\.output) == [100, 360, 361, 50, 25])
     precondition(reader.samples.map { $0.measurement.basis } == [.stream, .stream, .endToEnd, .endToEnd, .endToEnd])
-    precondition(reader.summary.recent == [100, 3000, 361 / 1.12, 50 / 1.119999999, 25])
-    precondition(reader.onceLines.contains { $0.contains("25.0 tok/s") && $0.contains(L10n.text("E2E fallback")) })
-    let detail = L10n.text("End to end: %@ tok/s (%@) · TTFT: %@", "25.0", "1.00s", "1.00s")
+    precondition(reader.summary.recent.map(\.speed) == [100, 3000, 361 / 1.12, 50 / 1.119999999, 25])
+    precondition(reader.onceLines.contains { $0.contains("25 tok/s") && $0.contains(L10n.text("E2E fallback")) })
+    let detail = L10n.text("End to end: %@ tok/s (%@) · TTFT: %@", "25", "1.00s", "1.00s")
     precondition(reader.onceLines.last == "details:   \(detail)")
 
     // A restart checkpoint lets the next transaction overwrite WAL frames
@@ -149,7 +149,7 @@ func testAntigravityReader() throws {
     let currentWALSize = try fm.attributesOfItem(atPath: walPath)[.size] as? NSNumber
     precondition(walSize != nil && walSize == currentWALSize)
     reader.poll(now: now)
-    precondition(reader.summary.value == "125.0" && reader.databaseReadCount == sameSizeReads + 1)
+    precondition(reader.summary.value == "125" && reader.databaseReadCount == sameSizeReads + 1)
     for speed: Double? in [nil, 0, -1, .nan, .infinity] {
         precondition(StatusDisplay.numbersOnly.title(active: true, speed: speed, elapsed: 8) == L10n.text("%d s", 8))
     }
@@ -187,7 +187,7 @@ func testAntigravityReader() throws {
     // Leave an open-looking row from an older turn and a new pending model.
     try sql(cliDB, schema + """
         INSERT INTO steps VALUES (0, 132, 2, \(started(400)));
-        INSERT INTO steps VALUES (1, 15, 3, \(started(300)));
+        INSERT INTO steps VALUES (1, 15, 3, \(step(second - 300)));
         INSERT INTO steps VALUES (2, 14, 3, \(started(8)));
         INSERT INTO steps VALUES (3, 15, 2, \(started(7)));
         INSERT INTO gen_metadata VALUES (0, \(generation(90, step: 1)));
@@ -203,23 +203,26 @@ func testAntigravityReader() throws {
     precondition(mixed.sessionID == old && mixed.summary.active && mixed.currentTPS == nil,
         "Expected CLI pending step to win; selected=\(mixed.sessionID), active=\(mixed.summary.active), reads=\(mixed.databaseReadCount)")
     precondition(mixed.inFlightStart == Date(timeIntervalSince1970: Double(second - 8)))
-    precondition(mixed.summary.recent == [90] && mixed.summary.caption(now: clock) != L10n.text("This turn"))
+    let completed = CallHistoryPoint(completedAt: Date(timeIntervalSince1970: Double(second - 300)), speed: 90)
+    precondition(mixed.summary.recent == [completed] && mixed.summary.caption(now: clock) != L10n.text("This turn"))
     try exec(cliWriter, "INSERT INTO gen_metadata VALUES (1, \(generation(150, step: 3)));")
     mixed.poll(now: clock)
     precondition(mixed.summary.active && mixed.summary.current == 150 && mixed.summary.caption() == L10n.text("This turn"))
-    let card = SummaryMenuView(source: .antigravity)
+    let card = SpeedPanelView(sources: [.antigravity]).cards[0]
     card.update(mixed.summary)
     let labels = card.subviews.compactMap { $0 as? NSTextField }
-    precondition(labels.count == 3 && card.toolTip == nil, "Antigravity uses the same three labels as every other card")
-    let speedLabel = labels.first { $0.stringValue == "150.0" }!
-    precondition(speedLabel.textColor == PanelStyle.activeColor)
-    precondition(mixed.summary.recent == [90], "An in-progress reading must not be put in completed history")
-    precondition(mixed.onceLines.contains { $0.hasPrefix("recorded:") && $0.contains("150.0 tok/s") })
+    precondition(labels.map(\.stringValue) == ["150"] && card.toolTip == nil &&
+        card.accessibilityLabel()?.contains(L10n.text("Recorded")) == true,
+        "Show only speed visually while identifying recorded speed to VoiceOver")
+    let speedLabel = labels[0]
+    precondition(speedLabel.textColor == PanelStyle.color(active: true))
+    precondition(mixed.summary.recent == [completed], "An in-progress reading must not be put in completed history")
+    precondition(mixed.onceLines.contains { $0.hasPrefix("recorded:") && $0.contains("150 tok/s") })
     try exec(cliWriter, "UPDATE gen_metadata SET data = \(generation(200, step: 3)) WHERE idx = 1;")
     mixed.poll(now: clock)
     precondition(mixed.summary.current == 200, "A WAL update to the same gen_metadata row must advance the visible speed")
     card.update(mixed.summary)
-    precondition(speedLabel.stringValue == "200.0" && speedLabel.textColor == PanelStyle.activeColor)
+    precondition(speedLabel.stringValue == "200" && speedLabel.textColor == PanelStyle.color(active: true))
 
     // A different, more recent desktop run appears without a summary row.
     try sql(file(desktop, missing), schema + """
@@ -233,8 +236,15 @@ func testAntigravityReader() throws {
     precondition(mixed.sessionID == old && mixed.summary.current == 200)
     try exec(cliWriter, "UPDATE steps SET status = 3 WHERE idx = 3;")
     mixed.poll(now: clock)
-    precondition(!mixed.summary.active && mixed.currentTPS == nil, "Closed runs and stale pending rows must not keep the card highlighted")
+    precondition(!mixed.summary.active && mixed.currentTPS == nil, "Closed runs and stale pending rows must not present current-turn speed")
     card.update(mixed.summary)
-    precondition(speedLabel.textColor == .secondaryLabelColor)
+    precondition(speedLabel.textColor == PanelStyle.color(active: false) &&
+        speedLabel.stringValue == mixed.summary.value &&
+        card.accessibilityLabel()?.contains(mixed.summary.caption()) == true)
+    try sql(file(cli, new), "DELETE FROM gen_metadata;")
+    let cliOnly = AntigravityReader(root: cli.path)
+    cliOnly.poll(now: clock)
+    precondition(cliOnly.samples.contains { $0.output == 200 && $0.recordedCompletion == nil } &&
+        cliOnly.summary.recent == [completed], "A start timestamp must not stand in for an unrecorded completion")
     print("antigravity tests: passed (thresholds/CLI + desktop/non-newest or missing summary/pending steps/in-place WAL speed updates/session isolation/expiry)")
 }

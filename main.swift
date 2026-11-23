@@ -492,7 +492,7 @@ final class OpenCodeReader {
     var summary: SpeedSummary {
         SpeedSummary(name: SourceMode.opencode.label, active: inFlightStart != nil,
             live: liveTPS(), last: samples.last?.effectiveTPS, completedAt: samples.last?.completedAt,
-            history: samples.map(\.effectiveTPS), model: samples.last?.model ?? "",
+            history: samples.map { CallHistoryPoint(completedAt: $0.completedAt, speed: $0.effectiveTPS) }, model: samples.last?.model ?? "",
             measurement: L10n.text("Completed calls: streaming speed when available, otherwise end to end. This turn combines those calls without the time between them."))
     }
 
@@ -570,6 +570,7 @@ private struct ProtoFields {
 
 struct AntigravitySample {
     let completedAt: Date
+    let recordedCompletion: Date?
     let model: String
     let output: Int64
     let ttft: Double
@@ -605,7 +606,7 @@ struct AntigravitySample {
 
 // The writer can commit repeatedly into a preallocated WAL without changing the
 // main database or WAL size. Check timestamps and identity for both files.
-private struct AntigravityDatabaseStamp: Equatable {
+private struct SQLiteDatabaseStamp: Equatable {
     private struct FileStamp: Equatable {
         let device: dev_t
         let inode: ino_t
@@ -647,17 +648,17 @@ private struct AntigravityDatabaseStamp: Equatable {
     }
 }
 
-private struct AntigravityDatabaseCache<Value> {
-    private var entry: (stamp: AntigravityDatabaseStamp, value: Value)?
+struct SQLiteDatabaseCache<Value> {
+    private var entry: (stamp: SQLiteDatabaseStamp, value: Value)?
 
     mutating func read(_ path: String, load: (String) -> Value?) -> Value? {
-        let before = AntigravityDatabaseStamp(path)
+        let before = SQLiteDatabaseStamp(path)
         if let entry, entry.stamp == before { return entry.value }
         entry = nil
         guard let before, let value = load(path) else { return nil }
         // If a writer raced the read, revisit it next tick rather than caching
         // a snapshot under the newer stamp. Failed reads are also retried.
-        if before == AntigravityDatabaseStamp(path) { entry = (before, value) }
+        if before == SQLiteDatabaseStamp(path) { entry = (before, value) }
         return value
     }
 }
@@ -703,13 +704,15 @@ final class AntigravityReader {
     var currentTPS: Double? { inFlightMeasurement?.measurement.tps }
 
     private let roots: [String]
-    private var summaryCaches: [String: AntigravityDatabaseCache<[Candidate]>] = [:]
-    private var conversationCaches: [String: AntigravityDatabaseCache<Conversation>] = [:]
+    private var summaryCaches: [String: SQLiteDatabaseCache<[Candidate]>] = [:]
+    private var conversationCaches: [String: SQLiteDatabaseCache<Conversation>] = [:]
 
     var summary: SpeedSummary {
         SpeedSummary(name: SourceMode.antigravity.label, active: inFlightStart != nil, live: currentTPS,
             last: samples.last?.measurement.tps, completedAt: samples.last?.completedAt,
-            history: samples.map { $0.measurement.tps }, model: samples.last?.model ?? "",
+            history: samples.compactMap { sample in
+                sample.recordedCompletion.map { CallHistoryPoint(completedAt: $0, speed: sample.measurement.tps) }
+            }, model: samples.last?.model ?? "",
             measurement: L10n.text("Latest recorded model-call speed, not live per-token speed."))
     }
 
@@ -774,7 +777,7 @@ final class AntigravityReader {
         for root in roots {
             let path = "\(root)/conversation_summaries.db"
             let listed = summaryCaches[root, default: .init()].read(path, load: loadCandidates)
-            if listed == nil && (AntigravityDatabaseStamp(path) != nil
+            if listed == nil && (SQLiteDatabaseStamp(path) != nil
                 || selectedPath?.hasPrefix("\(root)/conversations/") == true) { readFailed = true }
             let candidates = listed ?? []
             let directory = "\(root)/conversations"
@@ -785,7 +788,7 @@ final class AntigravityReader {
                 guard name.hasSuffix(".db") else { return nil }
                 let id = String(name.dropLast(3))
                 guard UUID(uuidString: id) != nil,
-                      let stamp = AntigravityDatabaseStamp("\(directory)/\(name)"), recent(stamp.lastWrite) else { return nil }
+                      let stamp = SQLiteDatabaseStamp("\(directory)/\(name)"), recent(stamp.lastWrite) else { return nil }
                 return id
             })
             func inspect(_ id: String, running: Bool) -> Bool {
@@ -793,7 +796,7 @@ final class AntigravityReader {
                 guard visited.insert(path).inserted else { return false }
                 guard let conversation = conversationCaches[path, default: .init()].read(path, load: loadConversation) else {
                     // Summary rows can outlive the conversation DB.
-                    if path == selectedPath || AntigravityDatabaseStamp(path) != nil { readFailed = true }
+                    if path == selectedPath || SQLiteDatabaseStamp(path) != nil { readFailed = true }
                     return false
                 }
                 if let latest = conversation.latestStep, recent(latest), running || conversation.pendingStep != nil,
@@ -918,7 +921,9 @@ final class AntigravityReader {
                   let lastIndex = indices.max(), let step = steps[lastIndex], let end = step.date else { continue }
             let modelStep = indices.compactMap { steps[$0] }.filter { $0.type == 15 }.max { $0.index < $1.index } ?? step
             let model = chat.bytes(21).flatMap { String(data: $0, encoding: .utf8) } ?? ""
-            let sample = AntigravitySample(completedAt: end, model: model, output: Int64(output), ttft: first, stream: stream)
+            // The start-only fallback remains useful for session selection, but is not a history timestamp.
+            let sample = AntigravitySample(completedAt: end, recordedCompletion: modelStep.end,
+                model: model, output: Int64(output), ttft: first, stream: stream)
             found.append(Generation(sample: sample, stepIndex: modelStep.index, pending: modelStep.pending))
         }
         sqlite3_finalize(query)
@@ -1049,7 +1054,7 @@ final class ClaudeReader {
 }
 
 enum Fmt {
-    static func tps(_ v: Double) -> String { String(format: "%.1f", v) }
+    static func tps(_ v: Double) -> String { String(format: v > 10 ? "%.0f" : "%.1f", v) }
     static func secs(_ v: Double) -> String { String(format: "%.2fs", v) }
     static func int(_ v: Int64) -> String {
         let f = NumberFormatter()
@@ -1074,7 +1079,7 @@ enum Fmt {
 // MARK: - App
 
 enum SourceMode: String {
-    case auto, codex, opencode, claude, antigravity, hermes, cursor
+    case auto, codex, opencode, claude, antigravity, hermes, cursor, t3code
 
     var label: String {
         switch self {
@@ -1085,6 +1090,7 @@ enum SourceMode: String {
         case .antigravity: return "Antigravity"
         case .hermes: return "Hermes"
         case .cursor: return "Cursor"
+        case .t3code: return "T3 Code"
         }
     }
 
@@ -1096,13 +1102,14 @@ enum SourceMode: String {
         case .antigravity: return "moon.stars.fill"
         case .hermes: return "person.crop.circle.fill"
         case .cursor: return "cursorarrow"
+        case .t3code: return "square.stack.3d.up"
         }
     }
 }
 
 enum ToolOrder {
     // A static popularity-oriented default, not a measured or network-fetched ranking.
-    static let popular: [SourceMode] = [.claude, .codex, .opencode, .antigravity, .hermes, .cursor]
+    static let popular: [SourceMode] = [.claude, .codex, .opencode, .antigravity, .hermes, .cursor, .t3code]
 
     static func normalized(_ saved: [String]) -> [SourceMode] {
         var result: [SourceMode] = []
@@ -1225,19 +1232,29 @@ enum ProviderLogo {
 
 // MARK: - Compact speed panel
 
+struct CallHistoryPoint: Equatable {
+    let completedAt: Date
+    let speed: Double
+
+    var isValid: Bool { completedAt.timeIntervalSinceReferenceDate.isFinite && speed.isFinite && speed > 0 }
+}
+
 struct SpeedSummary {
+    static let historyLimit = 60
     let name: String
     let active: Bool
     let live: Double?
     let last: Double?
     let completedAt: Date?
-    let history: [Double]
+    let history: [CallHistoryPoint]
     let model: String
     let measurement: String
 
     var current: Double? { active ? StatusDisplay.validSpeed(live) : nil }
     var value: String { (current ?? StatusDisplay.validSpeed(last)).map(Fmt.tps) ?? "—" }
-    var recent: [Double] { Array(history.filter { $0.isFinite && $0 > 0 }.suffix(12)) }
+    var recent: [CallHistoryPoint] {
+        Array(history.filter(\.isValid).sorted { $0.completedAt < $1.completedAt }.suffix(Self.historyLimit))
+    }
 
     func caption(now: Date = Date()) -> String {
         if current != nil { return L10n.text("This turn") }
@@ -1255,64 +1272,308 @@ struct SpeedSummary {
 
     var tooltip: String {
         let identity = model.isEmpty ? name : "\(name) · \(model)"
-        return "\(identity)\n\(measurement)\n" + L10n.text("Trend: last %d calls, independent scale; not per-second data.", recent.count)
+        return "\(identity)\n\(measurement)"
     }
 }
 
 enum PanelStyle {
-    static let activeColor = NSColor(name: nil) { appearance in
-        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor.white.withAlphaComponent(0.9)
-            : NSColor.black.withAlphaComponent(0.9)
+    static let width: CGFloat = 360
+    static let inset: CGFloat = 16
+    static let plotWidth = width - inset * 2
+    static let plotHeight = plotWidth * 3 / 5
+
+    private static let activeColor = ink(alpha: 1)
+    private static let idleColor = ink(alpha: 0.52)
+
+    static func color(active: Bool) -> NSColor { active ? activeColor : idleColor }
+
+    private static func ink(alpha: CGFloat) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let white: CGFloat = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? 1 : 0
+            return NSColor(srgbRed: white, green: white, blue: white, alpha: alpha)
+        }
     }
 }
 
-final class SparklineView: NSView {
-    var values: [Double] = [] { didSet { needsDisplay = true } }
-    var color = NSColor.secondaryLabelColor { didSet { needsDisplay = true } }
-    override var allowsVibrancy: Bool { false }
+final class CallHistoryView: NSView {
+    struct Series: Equatable {
+        let source: SourceMode
+        let active: Bool
+        let samples: [CallHistoryPoint]
 
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        guard !values.isEmpty, let peak = values.max(), peak > 0 else { return }
-        let area = bounds.insetBy(dx: 3, dy: 3)
-        // Fixed 12 slots: absent samples aren't invented or filled with zeroes.
-        let points = values.enumerated().map { index, value in
-            NSPoint(x: area.minX + CGFloat(12 - values.count + index) * area.width / 11,
-                    y: area.minY + CGFloat(value / peak) * area.height)
-        }
-        let path = Self.smoothPath(points)
-        path.lineWidth = 1.5
-        path.lineJoinStyle = .round
-        path.lineCapStyle = .round
-        color.setStroke()
-        path.stroke()
-        if let last = points.last {
-            color.setFill()
-            NSBezierPath(ovalIn: NSRect(x: last.x - 2, y: last.y - 2, width: 4, height: 4)).fill()
+        var strokeWidth: CGFloat { active ? 3.6 : 2.8 }
+        var ink: NSColor {
+            let color = PanelStyle.color(active: true)
+            return active ? color : color.withAlphaComponent(0.28)
         }
     }
 
-    // Monotone cubic Hermite interpolation: smooth joins without inventing peaks
-    // or dipping below zero. One sample remains a dot; missing slots stay empty.
-    static func smoothPath(_ points: [NSPoint]) -> NSBezierPath {
-        let path = NSBezierPath()
-        guard let first = points.first else { return path }
-        path.move(to: first)
-        guard points.count > 1 else { return path }
-        let slopes = zip(points, points.dropFirst()).map { ($1.y - $0.y) / ($1.x - $0.x) }
-        var tangents = [slopes[0]]
-        for index in 1..<(points.count - 1) {
-            let left = slopes[index - 1], right = slopes[index]
-            tangents.append(left * right <= 0 ? 0 : 2 * left * right / (left + right))
+    struct Reading: Equatable {
+        let source: SourceMode
+        let sample: CallHistoryPoint
+        let position: NSPoint
+    }
+
+    static let plotInset: CGFloat = 12
+    static let lookback: TimeInterval = 6 * 3600
+    static let minimumSpan: TimeInterval = 5 * 60
+    static let maximumGap: TimeInterval = 20 * 60
+    private static let detailWidth: CGFloat = 12
+    private struct TimeScale {
+        let first: Date
+        let span: TimeInterval
+        let leading: TimeInterval
+
+        init(first: Date, last: Date) {
+            self.first = first
+            let observed = last.timeIntervalSince(first)
+            // Keep closely spaced samples from stretching across the whole plot.
+            span = max(CallHistoryView.minimumSpan, observed)
+            leading = (span - observed) / 2
         }
-        tangents.append(slopes.last!)
-        for index in 0..<(points.count - 1) {
-            let start = points[index], end = points[index + 1]
-            let dx = (end.x - start.x) / 3
-            path.curve(to: end,
-                controlPoint1: NSPoint(x: start.x + dx, y: start.y + dx * tangents[index]),
-                controlPoint2: NSPoint(x: end.x - dx, y: end.y - dx * tangents[index + 1]))
+
+        func position(of date: Date) -> CGFloat {
+            CGFloat((date.timeIntervalSince(first) + leading) / span)
+        }
+    }
+
+    private(set) var series: [Series] = []
+    private(set) var hoveredReading: Reading?
+    var onHover: ((Reading?) -> Void)?
+    private var hoverLocation: NSPoint?
+    private var hoverTracking: NSTrackingArea?
+    private let emptyLabel = NSTextField(labelWithString: L10n.text("No completed calls yet"))
+    override var allowsVibrancy: Bool { false }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        emptyLabel.frame = NSRect(x: 12, y: bounds.midY - 9, width: bounds.width - 24, height: 18)
+        emptyLabel.font = .systemFont(ofSize: 12)
+        emptyLabel.textColor = .secondaryLabelColor
+        emptyLabel.alignment = .center
+        emptyLabel.setAccessibilityElement(false)
+        addSubview(emptyLabel)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.image)
+        setAccessibilityLabel(L10n.text("Recent completed calls"))
+        setAccessibilityHelp(L10n.text("Bright lines share a completion-time scale. Faint lines show each idle tool’s own recent history, not the same times. All lines share a speed scale. Long gaps are not connected."))
+        setAccessibilityValue(L10n.text("No completed calls yet"))
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    func update(_ series: [Series]) {
+        let populated = Self.windowed(series)
+        guard self.series != populated else { return }
+        self.series = populated
+        emptyLabel.isHidden = !populated.isEmpty
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .medium
+        let readings = populated.map { entry in
+            let history = entry.samples.map { "\(formatter.string(from: $0.completedAt)): \(Fmt.tps($0.speed))" }
+            let state = entry.active ? L10n.text("Active") : L10n.text("Idle")
+            return "\(entry.source.label) (\(state)): \(history.joined(separator: ", "))"
+        }
+        setAccessibilityValue(readings.isEmpty ? L10n.text("No completed calls yet") : readings.joined(separator: "; "))
+        track(at: hoverLocation)
+        needsDisplay = true
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTracking { removeTrackingArea(hoverTracking) }
+        let area = NSTrackingArea(rect: .zero,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect], owner: self)
+        addTrackingArea(area)
+        hoverTracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { mouseMoved(with: event) }
+
+    override func mouseMoved(with event: NSEvent) {
+        track(at: convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseExited(with event: NSEvent) { track(at: nil) }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        track(at: nil)
+    }
+
+    func track(at location: NSPoint?) {
+        hoverLocation = location
+        let reading = location.flatMap { Self.nearestReading(to: $0, series: series, in: bounds) }
+        guard reading != hoveredReading else { return }
+        hoveredReading = reading
+        onHover?(reading)
+    }
+
+    static func nearestReading(to location: NSPoint, series: [Series], in bounds: NSRect) -> Reading? {
+        guard bounds.contains(location) else { return nil }
+        var best: Reading?
+        var distance: CGFloat = 16
+        // At equal distances prefer the foreground (drawn last) and then the newer point.
+        for (_, segments) in zip(series, visibleReadings(series, in: bounds)).reversed().sorted(by: { $0.0.active && !$1.0.active }) {
+            for reading in segments.flatMap({ $0 }).reversed() {
+                let candidate = hypot(reading.position.x - location.x, reading.position.y - location.y)
+                guard candidate < distance else { continue }
+                best = reading
+                distance = candidate
+            }
+        }
+        return best
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let plots = Self.visibleReadings(series, in: bounds).map { $0.map { $0.map(\.position) } }
+        let layers = zip(series, plots)
+        for isActive in [false, true] {
+            let group = layers.filter { $0.0.active == isActive }
+            for (entry, segments) in group {
+                drawTrace(entry, segments: segments)
+            }
+        }
+    }
+
+    private func drawTrace(_ entry: Series, segments: [[NSPoint]]) {
+        let path = Self.linePath(segments)
+        path.lineWidth = entry.strokeWidth
+        path.lineCapStyle = .round
+        path.lineJoinStyle = .round
+        entry.ink.set()
+        path.stroke()
+    }
+
+    static func windowed(_ series: [Series]) -> [Series] {
+        let latestActive = series.filter(\.active).compactMap { $0.samples.last?.completedAt }.max()
+        return series.compactMap { entry in
+            guard let latest = entry.active ? latestActive : entry.samples.last?.completedAt else { return nil }
+            let samples = withoutIsolatedSpikes(entry.samples)
+                .filter { latest.timeIntervalSince($0.completedAt) <= lookback }
+            return samples.isEmpty ? nil : Series(source: entry.source, active: entry.active, samples: samples)
+        }
+    }
+
+    static func withoutIsolatedSpikes(_ samples: [CallHistoryPoint]) -> [CallHistoryPoint] {
+        // Require nearby observations on both sides. Keep unconfirmed endpoints,
+        // ordinary variation, and consecutive high readings rather than cap TPS.
+        samples.enumerated().compactMap { index, sample in
+            guard index > 0 && index < samples.count - 1 else { return sample }
+            let previous = samples[index - 1], next = samples[index + 1]
+            let before = sample.completedAt.timeIntervalSince(previous.completedAt)
+            let after = next.completedAt.timeIntervalSince(sample.completedAt)
+            guard before > 0 && before <= maximumGap && after > 0 && after <= maximumGap,
+                  sample.speed / 4 >= max(previous.speed, next.speed) else { return sample }
+            return nil
+        }
+    }
+
+    /// Outer array is per-source; each inner array holds the contiguous segments of that source.
+    static func project(_ series: [Series], in bounds: NSRect) -> [[[NSPoint]]] {
+        let speeds = series.flatMap(\.samples).map(\.speed)
+        guard let low = speeds.min(), let high = speeds.max() else { return series.map { _ in [] } }
+        let area = bounds.insetBy(dx: plotInset, dy: plotInset)
+        let active = series.filter(\.active)
+        let activeScale: TimeScale?
+        if let first = active.compactMap({ $0.samples.first?.completedAt }).min(),
+           let last = active.compactMap({ $0.samples.last?.completedAt }).max() {
+            activeScale = TimeScale(first: first, last: last)
+        } else {
+            activeScale = nil
+        }
+        return series.map { entry in
+            guard let first = entry.samples.first?.completedAt, let last = entry.samples.last?.completedAt else { return [] }
+            // Idle histories fit their own recorded duration, never padding out the active timeline.
+            let scale = (entry.active ? activeScale : nil) ?? TimeScale(first: first, last: last)
+            var segments: [[NSPoint]] = []
+            var previous: Date?
+            for sample in entry.samples {
+                if previous.map({ sample.completedAt.timeIntervalSince($0) > maximumGap }) ?? true {
+                    segments.append([])
+                }
+                previous = sample.completedAt
+                let y = high == low ? 0.5 : (sample.speed - low) / (high - low)
+                segments[segments.count - 1].append(NSPoint(x: area.minX + area.width * scale.position(of: sample.completedAt),
+                    y: area.minY + area.height * CGFloat(y)))
+            }
+            return segments
+        }
+    }
+
+    static func visibleReadings(_ series: [Series], in bounds: NSRect) -> [[[Reading]]] {
+        let traces = zip(series, project(series, in: bounds)).map { entry, segments in
+            var samples = entry.samples.makeIterator()
+            return segments.map { segment in
+                var readings: [Reading] = []
+                for position in segment {
+                    guard let sample = samples.next() else { break }
+                    let reading = Reading(source: entry.source, sample: sample, position: position)
+                    // Several calls can share a coarse completion timestamp.
+                    if readings.last?.position.x == position.x { readings[readings.count - 1] = reading }
+                    else { readings.append(reading) }
+                }
+                guard readings.count > 2 else { return readings }
+                // The endpoints and gaps stay put. Where calls are too close to
+                // resolve comfortably, use a real middle-speed reading, not an average.
+                var reduced = [readings[0]]
+                var bucket: [Reading] = []
+                func flush() {
+                    guard !bucket.isEmpty else { return }
+                    let bySpeed = bucket.sorted { $0.sample.speed < $1.sample.speed }
+                    reduced.append(bySpeed[(bySpeed.count - 1) / 2])
+                    bucket.removeAll(keepingCapacity: true)
+                }
+                for reading in readings.dropFirst().dropLast() {
+                    if let start = bucket.first, reading.position.x - start.position.x >= detailWidth { flush() }
+                    bucket.append(reading)
+                }
+                flush()
+                reduced.append(readings[readings.count - 1])
+                return reduced
+            }
+        }
+        let speeds = traces.flatMap { $0 }.flatMap { $0 }.map { $0.sample.speed }
+        guard let low = speeds.min(), let high = speeds.max() else { return traces }
+        let area = bounds.insetBy(dx: plotInset, dy: plotInset)
+        return traces.map { $0.map { $0.map { reading in
+            let y = low == high ? 0.5 : (reading.sample.speed - low) / (high - low)
+            return Reading(source: reading.source, sample: reading.sample,
+                position: NSPoint(x: reading.position.x, y: area.minY + area.height * CGFloat(y)))
+        } } }
+    }
+
+    static func linePath(_ segments: [[NSPoint]]) -> NSBezierPath {
+        let path = NSBezierPath()
+        for segment in segments where segment.count > 1 {
+            path.move(to: segment[0])
+            let slopes = zip(segment, segment.dropFirst()).map { a, b -> CGFloat in
+                b.x > a.x ? (b.y - a.y) / (b.x - a.x) : 0
+            }
+            func tangent(_ index: Int) -> CGFloat {
+                if index == 0 { return slopes[0] }
+                if index == slopes.count { return slopes[index - 1] }
+                let a = slopes[index - 1], b = slopes[index]
+                guard (a > 0 && b > 0) || (a < 0 && b < 0) else { return 0 }
+                // Limit the knot's shared slope, not the two handles separately.
+                // A single tangent keeps joins smooth even when time intervals differ.
+                let magnitude = min(abs(2 / (1 / a + 1 / b)), 1.5 * min(abs(a), abs(b)))
+                return a > 0 ? magnitude : -magnitude
+            }
+            for index in slopes.indices {
+                let a = segment[index], b = segment[index + 1]
+                guard b.x > a.x else {
+                    // Keep observations with identical timestamps at the same X.
+                    path.line(to: b)
+                    continue
+                }
+                let dx = (b.x - a.x) / 3
+                path.curve(to: b,
+                    controlPoint1: NSPoint(x: a.x + dx, y: a.y + dx * tangent(index)),
+                    controlPoint2: NSPoint(x: b.x - dx, y: b.y - dx * tangent(index + 1)))
+            }
         }
         return path
     }
@@ -1329,41 +1590,44 @@ final class SummaryMenuView: NSView {
             needsDisplay = true
         }
     }
-    var insertionEdge: MenuCardReorder.Edge? { didSet { needsDisplay = true } }
     var isDragging = false {
         didSet { subviews.forEach { $0.alphaValue = isDragging ? 0.35 : 1 }; needsDisplay = true }
     }
     private var hovered = false
     private var hoverTracking: NSTrackingArea?
-    private let nameLabel = NSTextField(labelWithString: "")
-    private let captionLabel = NSTextField(labelWithString: "")
     private let valueLabel = NSTextField(labelWithString: "—")
     private let icon = NSImageView()
-    private let sparkline = SparklineView()
+    private let classicName: NSTextField?
+    private let classicTrend: ClassicTrendView?
     override var allowsVibrancy: Bool { false }
 
-    init(source: SourceMode) {
+    init(source: SourceMode, frame: NSRect, layout: PanelLayout = .chart) {
         self.source = source
-        super.init(frame: NSRect(x: 0, y: 0, width: 360, height: 56))
-        icon.frame = NSRect(x: 15, y: 0, width: 18, height: 18)
-        icon.image = ProviderLogo.image(source) ?? NSImage(systemSymbolName: source.symbol, accessibilityDescription: nil)
+        classicName = layout == .classic ? NSTextField(labelWithString: source.label) : nil
+        classicTrend = layout == .classic ? ClassicTrendView(frame: NSRect(x: 158, y: 14, width: 94, height: 24)) : nil
+        super.init(frame: frame)
+        icon.frame = NSRect(x: bounds.midX - 9, y: 29, width: 18, height: 18)
         icon.imageScaling = .scaleProportionallyUpOrDown
         addSubview(icon)
-        nameLabel.frame = NSRect(x: 40, y: 26, width: 126, height: 18)
-        nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
-        captionLabel.frame = NSRect(x: 40, y: 9, width: 126, height: 15)
-        captionLabel.font = .systemFont(ofSize: 11)
-        // Align the logo with the whole two-line text block, not just the name.
-        icon.frame.origin.y = nameLabel.frame.union(captionLabel.frame).midY - icon.frame.height / 2
-        sparkline.frame = NSRect(x: 174, y: 18, width: 78, height: 24)
-        valueLabel.frame = NSRect(x: 260, y: 17, width: 84, height: 24)
-        valueLabel.font = .monospacedDigitSystemFont(ofSize: 18, weight: .medium)
-        valueLabel.alignment = .right
-        for label in [nameLabel, captionLabel, valueLabel] {
-            label.lineBreakMode = .byTruncatingTail
-            addSubview(label)
+        valueLabel.frame = NSRect(x: 2, y: 3, width: bounds.width - 4, height: 22)
+        valueLabel.font = .monospacedDigitSystemFont(ofSize: 17, weight: .semibold)
+        valueLabel.alignment = .center
+        valueLabel.lineBreakMode = .byTruncatingTail
+        valueLabel.setAccessibilityElement(false)
+        addSubview(valueLabel)
+        if let classicName, let classicTrend {
+            icon.frame.origin = NSPoint(x: 0, y: 17)
+            classicName.frame = NSRect(x: 26, y: 16, width: 124, height: 20)
+            classicName.font = .systemFont(ofSize: 13, weight: .medium)
+            classicName.lineBreakMode = .byTruncatingTail
+            classicName.setAccessibilityElement(false)
+            addSubview(classicName)
+            addSubview(classicTrend)
+            valueLabel.frame = NSRect(x: 258, y: 15, width: bounds.width - 258, height: 22)
+            valueLabel.alignment = .right
         }
-        addSubview(sparkline)
+        icon.setAccessibilityElement(false)
+        bind(source)
         setAccessibilityElement(true)
         setAccessibilityRole(.staticText)
     }
@@ -1372,11 +1636,13 @@ final class SummaryMenuView: NSView {
 
     func bind(_ source: SourceMode) {
         self.source = source
+        classicName?.stringValue = source.label
         icon.image = ProviderLogo.image(source) ?? NSImage(systemSymbolName: source.symbol, accessibilityDescription: nil)
+        needsDisplay = true
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        // Labels and the sparkline must behave like the rest of the card.
+        // Labels and the logo must behave like the rest of the card.
         let hit = super.hitTest(point)
         return onDrag != nil && hit != nil ? self : hit
     }
@@ -1403,73 +1669,185 @@ final class SummaryMenuView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         hovered = false
-        insertionEdge = nil
         isDragging = false
     }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         if hovered && onDrag != nil && !isDragging {
-            NSColor.tertiaryLabelColor.setFill()
-            for x: CGFloat in [4, 8] {
-                for y: CGFloat in [22, 27, 32] {
-                    NSBezierPath(ovalIn: NSRect(x: x, y: y, width: 2, height: 2)).fill()
-                }
-            }
-        }
-        if let edge = insertionEdge {
-            NSColor.controlAccentColor.setFill()
-            let y: CGFloat = edge == .top ? bounds.maxY - 2 : bounds.minY
-            NSBezierPath(roundedRect: NSRect(x: 12, y: y, width: bounds.width - 24, height: 2),
-                xRadius: 1, yRadius: 1).fill()
+            NSColor.labelColor.withAlphaComponent(0.07).setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 2),
+                xRadius: 7, yRadius: 7).fill()
         }
     }
 
+    private(set) var summary: SpeedSummary?
+
     func update(_ summary: SpeedSummary) {
-        nameLabel.stringValue = summary.name
-        captionLabel.stringValue = summary.caption()
-        valueLabel.stringValue = summary.value
-        let color = summary.active ? PanelStyle.activeColor : NSColor.secondaryLabelColor
-        nameLabel.textColor = color
-        valueLabel.textColor = color
-        captionLabel.textColor = .secondaryLabelColor
+        self.summary = summary
+        let color = PanelStyle.color(active: summary.active)
         icon.contentTintColor = color
-        sparkline.color = color
-        sparkline.values = summary.recent
-        toolTip = nil
+        valueLabel.textColor = color
+        classicName?.textColor = color
+        classicTrend?.update(summary.recent, active: summary.active)
+        valueLabel.stringValue = summary.value
         let state = summary.active ? L10n.text("Active") : L10n.text("Idle")
-        setAccessibilityLabel(L10n.text("%@, %@, %@, %@ tokens per second", summary.name, state, summary.caption(), summary.value))
+        let caption = source == .antigravity && summary.current != nil ? L10n.text("Recorded") : summary.caption()
+        setAccessibilityLabel(summary.value == "—"
+            ? L10n.text("%@, %@, %@", summary.name, state, caption)
+            : L10n.text("%@, %@, %@, %@ tokens per second", summary.name, state, caption, summary.value))
+    }
+}
+
+final class ClassicTrendView: NSView {
+    private var speeds: [Double] = []
+    private var active = false
+    override var allowsVibrancy: Bool { false }
+
+    func update(_ points: [CallHistoryPoint], active: Bool) {
+        let speeds = CallHistoryView.withoutIsolatedSpikes(points).suffix(12).map(\.speed)
+        guard self.speeds != speeds || self.active != active else { return }
+        self.speeds = speeds
+        self.active = active
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard speeds.count > 1, let peak = speeds.max(), peak > 0 else { return }
+        let area = bounds.insetBy(dx: 2, dy: 2)
+        let points = speeds.enumerated().map { index, speed in
+            NSPoint(x: area.minX + area.width * CGFloat(12 - speeds.count + index) / 11,
+                y: area.minY + area.height * CGFloat(speed / peak))
+        }
+        let style = CallHistoryView.Series(source: .auto, active: active, samples: [])
+        let path = CallHistoryView.linePath([points])
+        path.lineWidth = style.strokeWidth
+        path.lineCapStyle = .round
+        path.lineJoinStyle = .round
+        style.ink.setStroke()
+        path.stroke()
+    }
+}
+
+struct ChartReadoutFormatter {
+    private let time = DateFormatter()
+    private let dateTime = DateFormatter()
+    private let number = NumberFormatter()
+
+    init(locale: Locale) {
+        time.locale = locale
+        time.setLocalizedDateFormatFromTemplate("jm")
+        dateTime.locale = locale
+        dateTime.setLocalizedDateFormatFromTemplate("MMMdjm")
+        number.locale = locale
+        number.numberStyle = .decimal
+        number.usesGroupingSeparator = false
+    }
+
+    func timestamp(_ date: Date, now: Date = Date()) -> String {
+        if Calendar.current.isDate(date, inSameDayAs: now) { return time.string(from: date) }
+        if Calendar.current.isDate(date, equalTo: now, toGranularity: .year) {
+            return dateTime.string(from: date)
+        }
+        // Include the year for older idle history, but still omit seconds.
+        let full = DateFormatter()
+        full.locale = time.locale
+        full.setLocalizedDateFormatFromTemplate("yMMMdjm")
+        return full.string(from: date)
+    }
+
+    func speed(_ speed: Double) -> String {
+        let digits = speed > 10 ? 0 : 1
+        number.minimumFractionDigits = digits
+        number.maximumFractionDigits = digits
+        return number.string(from: NSNumber(value: speed)) ?? Fmt.tps(speed)
+    }
+}
+
+final class SpeedPanelView: NSView {
+    static let legendHeight: CGFloat = 52
+    static let chartY = legendHeight + 8
+    static let height = chartY + PanelStyle.plotHeight + 28
+
+    let chart: CallHistoryView
+    let cards: [SummaryMenuView]
+    let layout: PanelLayout
+    private let readout = NSTextField(labelWithString: "")
+    private let readoutFormatter = ChartReadoutFormatter(locale: Locale(identifier: L10n.language))
+    var hoverText: String { readout.stringValue }
+    override var allowsVibrancy: Bool { false }
+
+    init(sources: [SourceMode], layout: PanelLayout = .chart) {
+        self.layout = layout
+        chart = CallHistoryView(frame: NSRect(x: PanelStyle.inset, y: Self.chartY,
+            width: PanelStyle.plotWidth, height: PanelStyle.plotHeight))
+        let slotWidth = PanelStyle.plotWidth / CGFloat(max(1, sources.count))
+        cards = sources.enumerated().map { index, source in
+            let frame = layout == .classic
+                ? NSRect(x: PanelStyle.inset, y: CGFloat(sources.count - index - 1) * Self.legendHeight,
+                    width: PanelStyle.plotWidth, height: Self.legendHeight)
+                : NSRect(x: PanelStyle.inset + CGFloat(index) * slotWidth,
+                    y: 0, width: slotWidth, height: Self.legendHeight)
+            return SummaryMenuView(source: source, frame: frame, layout: layout)
+        }
+        let height = layout == .classic ? CGFloat(sources.count) * Self.legendHeight + 8 : Self.height
+        super.init(frame: NSRect(x: 0, y: 0, width: PanelStyle.width, height: height))
+        cards.forEach { addSubview($0) }
+        guard layout == .chart else { return }
+        readout.frame = NSRect(x: PanelStyle.inset, y: chart.frame.maxY + 2,
+            width: PanelStyle.plotWidth, height: 18)
+        readout.alignment = .center
+        readout.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        readout.textColor = .labelColor
+        readout.lineBreakMode = .byTruncatingTail
+        readout.setAccessibilityElement(false)
+        addSubview(readout)
+        addSubview(chart)
+        chart.onHover = { [weak self] reading in
+            guard let self else { return }
+            guard let reading else { self.readout.stringValue = ""; return }
+            self.readout.stringValue = L10n.text("%@ · %@ · %@ tok/s", reading.source.label,
+                self.readoutFormatter.timestamp(reading.sample.completedAt),
+                self.readoutFormatter.speed(reading.sample.speed))
+        }
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    func update(_ summaries: [SourceMode: SpeedSummary]) {
+        let series: [CallHistoryView.Series] = cards.compactMap { card in
+            guard let summary = summaries[card.source] else { return nil }
+            card.update(summary)
+            return CallHistoryView.Series(source: card.source, active: summary.active, samples: summary.recent)
+        }
+        if layout == .chart { chart.update(series) }
     }
 }
 
 final class PanelActionButton: NSButton {
-    private let titleLabel: NSTextField
-    private let shortcutLabel: NSTextField
+    static let side: CGFloat = 32
+    private let menuAction: NSMenuItem
     private var hoverTracking: NSTrackingArea?
     private var hovered = false
     override var allowsVibrancy: Bool { false }
 
-    init(title: String, shortcut: String) {
-        titleLabel = NSTextField(labelWithString: title)
-        shortcutLabel = NSTextField(labelWithString: shortcut)
-        super.init(frame: NSRect(x: 0, y: 0, width: 360, height: 28))
+    init(item: NSMenuItem, symbol: String, shortcut: String) {
+        menuAction = item
+        super.init(frame: NSRect(x: 0, y: 0, width: Self.side, height: Self.side))
         isBordered = false
-        imagePosition = .noImage
+        title = ""
+        image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 14, weight: .medium))
+        image?.isTemplate = true
+        imageScaling = .scaleNone
         setButtonType(.momentaryChange)
-        autoresizingMask = [.width]
-        titleLabel.frame = NSRect(x: 16, y: 5, width: 250, height: 18)
-        titleLabel.font = .systemFont(ofSize: 13)
-        titleLabel.lineBreakMode = .byTruncatingTail
-        shortcutLabel.frame = NSRect(x: 280, y: 5, width: 64, height: 18)
-        shortcutLabel.font = .systemFont(ofSize: 13)
-        shortcutLabel.alignment = .right
-        shortcutLabel.autoresizingMask = [.minXMargin]
-        addSubview(titleLabel)
-        addSubview(shortcutLabel)
+        imagePosition = .imageOnly
+        toolTip = "\(item.title) (\(shortcut))"
         target = self
         action = #selector(activateItem(_:))
-        setAccessibilityLabel(title)
-        setAccessibilityRole(.menuItem)
+        setAccessibilityLabel(item.title)
+        setAccessibilityRole(.button)
     }
 
     required init?(coder: NSCoder) { nil }
@@ -1494,56 +1872,45 @@ final class PanelActionButton: NSButton {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let highlighted = hovered || isHighlighted
-        if highlighted {
-            NSColor.selectedContentBackgroundColor.setFill()
-            NSBezierPath(roundedRect: bounds.insetBy(dx: 5, dy: 1), xRadius: 5, yRadius: 5).fill()
+        if hovered || isHighlighted {
+            NSColor.labelColor.withAlphaComponent(isHighlighted ? 0.17 : 0.09).setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 2), xRadius: 6, yRadius: 6).fill()
         }
-        titleLabel.textColor = highlighted ? .alternateSelectedControlTextColor : .labelColor
-        shortcutLabel.textColor = highlighted ? .alternateSelectedControlTextColor : .secondaryLabelColor
+        super.draw(dirtyRect)
     }
 
     @objc private func activateItem(_ sender: Any?) {
-        guard let item = enclosingMenuItem, let action = item.action else { return }
-        item.menu?.cancelTracking()
-        NSApp.sendAction(action, to: item.target, from: item)
+        guard let action = menuAction.action else { return }
+        menuAction.menu?.cancelTracking()
+        NSApp.sendAction(action, to: menuAction.target, from: menuAction)
     }
 }
 
-final class PanelSeparatorView: NSView {
+final class PanelFooterView: NSView {
+    static let topPadding: CGFloat = 14
+    static let bottomPadding: CGFloat = 2
+    static let height = PanelActionButton.side + topPadding + bottomPadding
     override var allowsVibrancy: Bool { false }
 
-    override init(frame: NSRect) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 360, height: 9))
+    init(settings: NSMenuItem, quit: NSMenuItem) {
+        super.init(frame: NSRect(x: 0, y: 0, width: PanelStyle.width, height: Self.height))
         autoresizingMask = [.width]
         setAccessibilityElement(false)
+        let buttons = [PanelActionButton(item: settings, symbol: "gearshape", shortcut: "⌘,"),
+                       PanelActionButton(item: quit, symbol: "power", shortcut: "⌘Q")]
+        let gap: CGFloat = 4
+        var right = bounds.maxX - PanelStyle.inset
+        for button in buttons.reversed() {
+            right -= button.frame.width
+            button.frame.origin = NSPoint(x: right, y: Self.bottomPadding)
+            button.autoresizingMask = [.minXMargin]
+            right -= gap
+        }
+        buttons.forEach { addSubview($0) }
     }
 
     required init?(coder: NSCoder) { nil }
 
-    override func draw(_ dirtyRect: NSRect) {
-        NSColor.labelColor.withAlphaComponent(0.1).setFill()
-        NSRect(x: 16, y: bounds.midY, width: bounds.width - 32, height: 0.5).fill()
-    }
-}
-
-final class PanelHeaderView: NSView {
-    override var allowsVibrancy: Bool { false }
-    override init(frame: NSRect) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 360, height: 34))
-        let title = NSTextField(labelWithString: L10n.text("Token speed"))
-        title.frame = NSRect(x: 16, y: 8, width: 180, height: 18)
-        title.font = .systemFont(ofSize: 12, weight: .semibold)
-        title.textColor = .labelColor
-        let unit = NSTextField(labelWithString: "tok/s")
-        unit.frame = NSRect(x: 280, y: 8, width: 64, height: 18)
-        unit.font = .systemFont(ofSize: 11)
-        unit.alignment = .right
-        unit.textColor = .secondaryLabelColor
-        addSubview(title)
-        addSubview(unit)
-    }
-    required init?(coder: NSCoder) { nil }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -1556,6 +1923,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let antigravity = AntigravityReader()
     private let hermes = HermesReader()
     private let cursor = CursorReader()
+    private let t3 = T3CodeReader()
     private var timer: Timer?
     private var statusItem: NSStatusItem!
     private var lastScan = Date.distantPast
@@ -1564,11 +1932,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var cursorHookReady = false
     var selftest = false
     private var currentSymbol = "-"
-    private var summaryItems: [SourceMode: NSMenuItem] = [:]
+    private weak var speedPanel: SpeedPanelView?
     private var settingsController: SettingsWindowController?
 
     private var settingsState: SettingsState {
-        SettingsState(sources: toolOrder, source: effectiveMode, display: display)
+        SettingsState(sources: toolOrder, source: effectiveMode, display: display, layout: panelLayout)
     }
 
     init(defaults: UserDefaults = .standard, detectInstalledTools: @escaping () -> Set<SourceMode> = { InstalledTools.detect() }) {
@@ -1586,6 +1954,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var display: StatusDisplay {
         get { StatusDisplay(rawValue: defaults.string(forKey: "statusDisplay") ?? "") ?? .speedAndUnit }
         set { defaults.set(newValue.rawValue, forKey: "statusDisplay") }
+    }
+
+    private var panelLayout: PanelLayout {
+        get { PanelLayout(rawValue: defaults.string(forKey: "panelLayout") ?? "") ?? .chart }
+        set { defaults.set(newValue.rawValue, forKey: "panelLayout") }
     }
 
     private var savedToolOrder: [SourceMode] {
@@ -1608,7 +1981,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             (.claude, claude.inFlightStart != nil, max(claude.samples.last?.completedAt ?? .distantPast, claude.inFlightStart ?? .distantPast)),
             (.antigravity, antigravity.inFlightStart != nil, antigravity.activityDate),
             (.hermes, false, hermes.samples.last?.completedAt ?? .distantPast),
-            (.cursor, cursor.inFlightStart != nil, max(cursor.samples.last?.completedAt ?? .distantPast, cursor.inFlightStart ?? .distantPast))
+            (.cursor, cursor.inFlightStart != nil, max(cursor.samples.last?.completedAt ?? .distantPast, cursor.inFlightStart ?? .distantPast)),
+            (.t3code, t3.inFlightStart() != nil, t3.activityDate)
         ]
         return Self.preferredSource(mode: effectiveMode, activity: activity.filter { installedSources.contains($0.source) })
     }
@@ -1643,12 +2017,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         print("selftest: antigravity=\(antigravity.samples.count) last=\(antigravity.samples.last.map { Fmt.tps($0.measurement.tps) } ?? "-") session=\(antigravity.sessionID)")
         print("selftest: hermes=\(hermes.samples.count) last=\(hermes.samples.last.map { Fmt.tps(HermesReader.speed($0)) } ?? "-")")
         print("selftest: cursor=\(cursor.samples.count) last=\(cursor.samples.last.map { Fmt.tps($0.effectiveTPS) } ?? "-") active=\(cursor.inFlightStart != nil)")
+        print("selftest: t3code=\(t3.samples.count) last=\(t3.samples.last.map { Fmt.tps($0.effectiveTPS) } ?? "-") active=\(t3.inFlightStart() != nil)")
         print("selftest: generating codex=\(isCodexGenerating) opencode=\(isOpenCodeGenerating)")
         print("selftest: live codex=\(reader.liveTPS().map { Fmt.tps($0) } ?? "-") turnOut=\(reader.turnOutput) opencode=\(oc.liveTPS().map { Fmt.tps($0) } ?? "-") turnOut=\(oc.turnOutput)")
         if let menu = statusItem.menu {
             menuWillOpen(menu)
             for source in ToolOrder.popular {
-                print("selftest: menu \(summaryItems[source]?.title ?? "missing")")
+                let summary = speedPanel?.cards.first { $0.source == source }?.summary
+                print("selftest: menu \(summary.map { "\($0.name) · \($0.caption()) · \($0.value) tok/s" } ?? "missing")")
             }
         }
         NSApp.terminate(nil)
@@ -1665,6 +2041,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             reader.read(URL(fileURLWithPath: reader.path))
         }
         if installedSources.contains(.antigravity) { antigravity.poll() }
+        if installedSources.contains(.t3code) { t3.poll() }
         if installedSources.contains(.cursor) {
             if !cursorHookReady, Date().timeIntervalSince(lastCursorHookAttempt) > 60 {
                 lastCursorHookAttempt = Date()
@@ -1679,7 +2056,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if installedSources.contains(.opencode) { oc.poll() }
         }
         updateTitle()
-        updateSummaryItems()
+        updateSpeedPanel()
         settingsController?.update(settingsState)
     }
 
@@ -1699,6 +2076,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .claude: return claude.inFlightStart != nil
         case .antigravity: return antigravity.inFlightStart != nil
         case .cursor: return cursor.inFlightStart != nil
+        case .t3code: return t3.inFlightStart() != nil
         case .hermes: return false
         }
     }
@@ -1710,7 +2088,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .auto: return nil
         case .claude: return claude.liveTPS()
         case .antigravity: return antigravity.currentTPS
-        case .cursor: return nil
+        case .cursor, .t3code: return nil
         case .hermes: return nil
         }
     }
@@ -1732,6 +2110,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return Date().timeIntervalSince(start)
         case .cursor:
             guard let start = cursor.inFlightStart else { return nil }
+            return Date().timeIntervalSince(start)
+        case .t3code:
+            guard let start = t3.inFlightStart() else { return nil }
             return Date().timeIntervalSince(start)
         case .hermes: return nil
         }
@@ -1775,31 +2156,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func rebuildMenu(_ menu: NSMenu) {
         menu.removeAllItems()
         menu.autoenablesItems = false
-        summaryItems.removeAll()
-        let panelHeader = header(L10n.text("Token speed") + " · tok/s")
-        panelHeader.view = PanelHeaderView(frame: .zero)
-        menu.addItem(panelHeader)
+        let item = header(L10n.text("Recent completed calls"))
+        let panel = SpeedPanelView(sources: toolOrder, layout: panelLayout)
+        item.view = panel
+        menu.addItem(item)
+        speedPanel = panel
         if toolOrder.isEmpty { menu.addItem(header(L10n.text("No tools installed"))) }
-        for source in toolOrder {
-            let item = section(source.label, symbol: source.symbol, highlight: false)
-            item.view = SummaryMenuView(source: source)
-            summaryItems[source] = item
-            menu.addItem(item)
-        }
         configureReordering(in: menu)
-        updateSummaryItems()
-        menu.addItem(panelSeparator())
-
+        updateSpeedPanel()
         let settings = NSMenuItem(title: L10n.text("Settings") + "…", action: #selector(showSettings(_:)), keyEquivalent: ",")
         settings.target = self
-        settings.view = PanelActionButton(title: settings.title, shortcut: "⌘,")
-        menu.addItem(settings)
-
-        menu.addItem(panelSeparator())
         let quit = NSMenuItem(title: L10n.text("Quit"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp
-        quit.view = PanelActionButton(title: quit.title, shortcut: "⌘Q")
-        menu.addItem(quit)
+        // Keep native menu shortcut dispatch without adding visible text rows.
+        for action in [settings, quit] {
+            action.isHidden = true
+            action.allowsKeyEquivalentWhenHidden = true
+            menu.addItem(action)
+        }
+        let footer = header("")
+        footer.view = PanelFooterView(settings: settings, quit: quit)
+        menu.addItem(footer)
     }
 
     private func prepareSettings() -> SettingsWindowController {
@@ -1814,6 +2191,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         controller.onDisplay = { [weak self] display in
             self?.display = display
+            self?.settingsChanged()
+        }
+        controller.onLayout = { [weak self] layout in
+            self?.panelLayout = layout
             self?.settingsChanged()
         }
         settingsController = controller
@@ -1841,18 +2222,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var visible = order.makeIterator()
         let saved = savedToolOrder.map { installedSources.contains($0) ? visible.next()! : $0 }
         defaults.set(saved.map(\.rawValue), forKey: "toolOrder")
-        if let menu {
-            let items = menu.items.filter { $0.view is SummaryMenuView }
+        if let menu, let panel = menu.items.first?.view as? SpeedPanelView {
             // Rebind fixed slots rather than removing/inserting items in an open NSMenu.
-            if items.count == order.count {
-                summaryItems.removeAll()
-                for (item, source) in zip(items, order) {
-                    (item.view as? SummaryMenuView)?.bind(source)
-                    item.title = source.label
-                    summaryItems[source] = item
+            if panel.cards.count == order.count {
+                for (card, source) in zip(panel.cards, order) {
+                    card.bind(source)
                 }
                 configureReordering(in: menu)
-                updateSummaryItems()
+                updateSpeedPanel()
             }
         }
         settingsChanged()
@@ -1860,81 +2237,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func configureReordering(in menu: NSMenu) {
-        let rows = menu.items.compactMap { $0.view as? SummaryMenuView }
-        let sources = rows.map(\.source)
-        for (index, row) in rows.enumerated() {
-            row.onDrag = rows.count > 1 ? { [weak self, weak menu] card, event in
-                guard let self, let menu else { return }
-                let currentRows = menu.items.compactMap { $0.view as? SummaryMenuView }
-                MenuCardReorder.track(card, event: event, rows: currentRows) { destination in
+        guard let panel = menu.items.first?.view as? SpeedPanelView else { return }
+        let cards = panel.cards
+        let sources = cards.map(\.source)
+        for (index, card) in cards.enumerated() {
+            card.onDrag = cards.count > 1 ? { [weak self, weak menu, weak panel] card, event in
+                guard let self, let menu, let panel else { return }
+                MenuCardReorder.track(card, event: event, cards: panel.cards, vertical: panel.layout == .classic) { destination in
                     // Installation detection can refresh during tracking. Do not commit a stale list.
                     guard self.toolOrder == sources else { return }
                     self.moveTool(card.source, to: destination, in: menu)
                 }
             } : nil
             var actions: [NSAccessibilityCustomAction] = []
-            for (title, destination) in [("Move up", index - 1), ("Move down", index + 1)] where rows.indices.contains(destination) {
-                actions.append(NSAccessibilityCustomAction(name: L10n.text(title), handler: { [weak self, weak menu, weak row] in
-                    guard let self, let menu, let row, self.toolOrder == sources else { return false }
-                    return self.moveTool(row.source, to: destination, in: menu)
+            let labels = panel.layout == .classic ? ("Move up", "Move down") : ("Move left", "Move right")
+            for (title, destination) in [(labels.0, index - 1), (labels.1, index + 1)] where cards.indices.contains(destination) {
+                actions.append(NSAccessibilityCustomAction(name: L10n.text(title), handler: { [weak self, weak menu, weak card] in
+                    guard let self, let menu, let card, self.toolOrder == sources else { return false }
+                    return self.moveTool(card.source, to: destination, in: menu)
                 }))
             }
-            row.setAccessibilityCustomActions(actions)
+            card.setAccessibilityCustomActions(actions)
         }
     }
 
-    private func updateSummaryItems() {
-        func apply(_ source: SourceMode, _ summary: SpeedSummary) {
-            guard let item = summaryItems[source] else { return }
-            item.title = "\(summary.name) · \(summary.caption()) · \(summary.value) tok/s"
-            (item.view as? SummaryMenuView)?.update(summary)
-        }
+    private func updateSpeedPanel() {
+        guard let panel = speedPanel, !panel.cards.isEmpty else { return }
+        var summaries: [SourceMode: SpeedSummary] = [:]
         func update(_ source: SourceMode, active: Bool, live: Double?, last: Double?,
-                    completed: Date?, history: [Double], model: String, measurement: String) {
-            apply(source, SpeedSummary(name: source.label, active: active, live: live, last: last,
-                completedAt: completed, history: history, model: model, measurement: measurement))
+                     completed: Date?, history: [CallHistoryPoint], model: String, measurement: String) {
+            summaries[source] = SpeedSummary(name: source.label, active: active, live: live, last: last,
+                completedAt: completed, history: history, model: model, measurement: measurement)
         }
         let cumulative = L10n.text("This turn: output tokens / total completed-call duration, excluding tool execution; not instantaneous per-token speed.")
+        func history(_ samples: [Sample], speed: (Sample) -> Double = { $0.effectiveTPS }) -> [CallHistoryPoint] {
+            samples.map { CallHistoryPoint(completedAt: $0.completedAt, speed: speed($0)) }
+        }
         update(.codex, active: isCodexGenerating, live: reader.liveTPS(), last: reader.samples.last?.effectiveTPS,
-            completed: reader.samples.last?.completedAt, history: reader.samples.map(\.effectiveTPS), model: reader.model, measurement: cumulative)
-        if summaryItems[.opencode] != nil { apply(.opencode, oc.summary) }
+             completed: reader.samples.last?.completedAt, history: history(reader.samples), model: reader.model, measurement: cumulative)
+        summaries[.opencode] = oc.summary
         update(.claude, active: claude.inFlightStart != nil, live: claude.liveTPS(), last: claude.samples.last?.effectiveTPS,
-            completed: claude.samples.last?.completedAt, history: claude.samples.map(\.effectiveTPS), model: claude.samples.last?.model ?? "", measurement: cumulative + "\n" + L10n.text("Claude measures from request start to the first complete output block, including time to first token."))
-        if summaryItems[.antigravity] != nil { apply(.antigravity, antigravity.summary) }
+             completed: claude.samples.last?.completedAt, history: history(claude.samples), model: claude.samples.last?.model ?? "", measurement: cumulative + "\n" + L10n.text("Claude measures from request start to the first complete output block, including time to first token."))
+        summaries[.antigravity] = antigravity.summary
         update(.hermes, active: false, live: nil, last: hermes.samples.last.map(HermesReader.speed),
-            completed: hermes.samples.last?.completedAt, history: hermes.samples.map(HermesReader.speed),
+             completed: hermes.samples.last?.completedAt, history: history(hermes.samples, speed: HermesReader.speed),
             model: hermes.samples.last?.model ?? "",
             measurement: hermes.latestBasis == .stream
                 ? L10n.text("Last call: estimated stream speed (first chunk to API completion).")
                 : L10n.text("Last call: output tokens / full API time."))
         update(.cursor, active: cursor.inFlightStart != nil, live: nil, last: cursor.samples.last?.effectiveTPS,
-            completed: cursor.samples.last?.completedAt, history: cursor.samples.map(\.effectiveTPS),
+             completed: cursor.samples.last?.completedAt, history: history(cursor.samples),
             model: cursor.samples.last?.model ?? cursor.inFlightModel,
             measurement: L10n.text("Cursor hook: last completed turn. Recorded output tokens / whole-turn time from prompt submit to loop stop, including thinking, tools and waiting; not pure model generation speed. While a turn runs, the menu bar shows elapsed time only."))
-    }
-
-    private func section(_ title: String, symbol: String, highlight: Bool) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        item.isEnabled = false
-        if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) {
-            image.isTemplate = true
-            item.image = image
-        }
-        if highlight { item.title = "▸ \(title)" }
-        return item
+        update(.t3code, active: t3.inFlightStart() != nil, live: nil, last: t3.samples.last?.effectiveTPS,
+             completed: t3.samples.last?.completedAt, history: history(t3.samples), model: t3.samples.last?.model ?? "",
+            measurement: L10n.text("T3 Code: last completed turn. Output tokens / full turn duration, including tools and waiting."))
+        panel.update(summaries)
     }
 
     private func header(_ title: String) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.isEnabled = false
-        return item
-    }
-
-    private func panelSeparator() -> NSMenuItem {
-        // Native separator items ignore custom views and keep the system's stroke.
-        let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-        item.isEnabled = false
-        item.view = PanelSeparatorView(frame: .zero)
         return item
     }
 
@@ -1944,26 +2307,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         defer { NSStatusBar.system.removeStatusItem(statusItem) }
         let menu = NSMenu()
         func openMenu() { rebuildMenu(menu) }
-        func verifyQuitPlacement() {
-            let quit = menu.items.last!
+        func verifyQuitPlacement() -> [NSButton] {
+            let quit = menu.items.first { $0.title == L10n.text("Quit") }!
             precondition(quit.action == #selector(NSApplication.terminate(_:)) && quit.submenu == nil)
-            precondition(quit.target === NSApp && quit.keyEquivalent == "q")
-            precondition(menu.items[menu.items.count - 2].view is PanelSeparatorView)
-            func containsQuit(_ submenu: NSMenu) -> Bool {
-                submenu.items.contains { $0.action == #selector(NSApplication.terminate(_:)) || ($0.submenu.map(containsQuit) ?? false) }
-            }
-            precondition(!menu.items.compactMap(\.submenu).contains(where: containsQuit), "Quit must only appear as the last top-level item")
+            precondition(quit.target === NSApp && quit.keyEquivalent == "q" && quit.isHidden && quit.allowsKeyEquivalentWhenHidden)
+            precondition(!menu.items.contains(where: \.isSeparatorItem))
+            let footer = menu.items.last!.view as! PanelFooterView
+            let buttons = footer.subviews.compactMap { $0 as? NSButton }
+            precondition(buttons.count == 2 && buttons.allSatisfy { $0.title.isEmpty && $0.image != nil && $0.imagePosition == .imageOnly })
+            precondition(buttons[0].frame.minX > footer.bounds.midX &&
+                buttons[0].frame.maxX < buttons[1].frame.minX &&
+                buttons[1].frame.maxX == footer.bounds.maxX - PanelStyle.inset)
+            precondition(buttons.allSatisfy { footer.bounds.maxY - $0.frame.maxY == 14 })
+            return buttons
         }
         func send(_ control: NSControl) {
             precondition(NSApp.sendAction(control.action!, to: control.target, from: control))
         }
         openMenu()
-        verifyQuitPlacement()
-        precondition(menu.items.last?.title == L10n.text("Quit"))
+        let buttons = verifyQuitPlacement()
         precondition(menu.items.allSatisfy { $0.submenu == nil })
         let settings = menu.items.first { $0.action == #selector(showSettings(_:)) }!
-        precondition(settings.title == L10n.text("Settings") + "…" && settings.keyEquivalent == ",")
-        precondition(NSApp.sendAction(settings.action!, to: settings.target, from: settings))
+        precondition(settings.title == L10n.text("Settings") + "…" && settings.keyEquivalent == "," &&
+            settings.isHidden && settings.allowsKeyEquivalentWhenHidden)
+        send(buttons[0])
         let controller = settingsController!
         precondition(controller.window?.isVisible == true)
         let closeEvent = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command,
@@ -1971,12 +2338,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             characters: "w", charactersIgnoringModifiers: "w", isARepeat: false, keyCode: 13)!
         precondition(controller.window!.performKeyEquivalent(with: closeEvent))
         precondition(controller.window?.isVisible == false, "Command-W closes Settings, not the app")
-        precondition(NSApp.sendAction(settings.action!, to: settings.target, from: settings))
+        let settingsEvent = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command,
+            timestamp: 0, windowNumber: 0, context: nil,
+            characters: ",", charactersIgnoringModifiers: ",", isARepeat: false, keyCode: 43)!
+        precondition(menu.performKeyEquivalent(with: settingsEvent))
         precondition(settingsController === controller && controller.window?.isVisible == true, "Reuse the settings window")
         defer { controller.window?.close() }
-        precondition(menu.items.compactMap { $0.view is SummaryMenuView ? $0.title : nil } == toolOrder.map {
-            "\($0.label) · \(L10n.text("No data")) · — tok/s"
-        })
+        let panel = menu.items.first!.view as! SpeedPanelView
+        precondition(panel.cards.map { $0.summary?.name } == toolOrder.map(\.label))
+        precondition(panel.cards.allSatisfy { $0.summary?.caption() == L10n.text("No data") })
         precondition(display == .speedAndUnit)
         controller.displayPopup.selectItem(at: 2)
         send(controller.displayPopup)
@@ -1985,25 +2355,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         controller.sourcePopup.selectItem(at: ([SourceMode.auto] + toolOrder).firstIndex(of: .opencode)!)
         send(controller.sourcePopup)
         precondition(mode == .opencode)
-        precondition(controller.window!.contentView!.subviews.count == 1, "Settings only contains the two-row grid")
-        let originalItems = menu.items.filter { $0.view is SummaryMenuView }
-        let originalViews = originalItems.map { $0.view! }
+        let grid = controller.window!.contentView!.subviews.first as? NSGridView
+        precondition(grid?.numberOfRows == 3)
+        let originalItems = menu.items
+        let originalFrames = panel.cards.map(\.frame)
         precondition(moveTool(.claude, to: 2, in: menu))
-        precondition(toolOrder == [.codex, .opencode, .claude, .antigravity, .hermes, .cursor])
-        let reorderedItems = menu.items.filter { $0.view is SummaryMenuView }
-        precondition(zip(originalItems, reorderedItems).allSatisfy { $0 === $1 }, "Reordering preserves NSMenu slots")
-        precondition(zip(originalViews, reorderedItems.map { $0.view! }).allSatisfy { $0 === $1 }, "Reordering preserves attached views")
-        precondition(menu.items.compactMap { ($0.view as? SummaryMenuView)?.source } == toolOrder)
-        precondition(toolOrder.allSatisfy { (summaryItems[$0]?.view as? SummaryMenuView)?.source == $0 })
+        precondition(toolOrder == [.codex, .opencode, .claude, .antigravity, .hermes, .cursor, .t3code])
+        precondition(menu.items.count == originalItems.count &&
+            zip(originalItems, menu.items).allSatisfy { $0 === $1 }, "Reordering preserves NSMenu slots")
+        precondition(menu.items.first?.view === panel && panel.cards.map(\.frame) == originalFrames,
+            "Reordering leaves the attached chart and legend slots in place")
+        precondition(panel.cards.map(\.source) == toolOrder)
         precondition(controller.state?.sources == toolOrder && controller.state?.source == .opencode)
         let restored = AppDelegate(defaults: defaults, detectInstalledTools: { Set(ToolOrder.popular) })
         precondition(restored.toolOrder == toolOrder && restored.mode == mode && restored.display == display)
         precondition(controller.displayPopup.indexOfSelectedItem == 2)
-        let firstCard = menu.items[1].view as! SummaryMenuView
+        let firstCard = panel.cards[0]
         precondition(firstCard.accessibilityCustomActions()?.count == 1)
-        let moveDown = firstCard.accessibilityCustomActions()!.first!
-        precondition(moveDown.name == L10n.text("Move down") && moveDown.handler?() == true)
-        precondition(toolOrder == [.opencode, .codex, .claude, .antigravity, .hermes, .cursor], "VoiceOver can reorder without dragging")
+        let moveRight = firstCard.accessibilityCustomActions()!.first!
+        precondition(moveRight.name == L10n.text("Move right") && moveRight.handler?() == true)
+        precondition(toolOrder == [.opencode, .codex, .claude, .antigravity, .hermes, .cursor, .t3code], "VoiceOver can reorder without dragging")
         precondition(moveTool(.claude, to: 0, in: menu))
         precondition(moveTool(.codex, to: 1, in: menu))
         openMenu()
@@ -2023,11 +2394,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             renderStatus(source: .antigravity, active: true, speed: 200, elapsed: 8)
             let recorded = choice.title(active: true, speed: 200, elapsed: 8)
             precondition(statusItem.button?.attributedTitle.string == (recorded.isEmpty ? "" : " " + recorded))
-            precondition(statusItem.button?.toolTip == L10n.text("%@: latest recorded model call, %@ tok/s", SourceMode.antigravity.label, "200.0"))
+            precondition(statusItem.button?.toolTip == L10n.text("%@: latest recorded model call, %@ tok/s", SourceMode.antigravity.label, "200"))
             renderStatus(source: .opencode, active: false, speed: nil, elapsed: 0)
             precondition(statusItem.button?.title == "" && currentSymbol == "bolt.fill")
         }
-        print("settings smoke: passed (two-row window/reopen/source/display/persistence/status modes/top-level quit)")
+        precondition(panelLayout == .chart && controller.layoutPopup.indexOfSelectedItem == 0)
+        controller.layoutPopup.selectItem(at: 1)
+        send(controller.layoutPopup)
+        openMenu()
+        let classic = menu.items.first!.view as! SpeedPanelView
+        precondition(classic.layout == .classic && classic.chart.superview == nil)
+        precondition(classic.cards.map(\.source) == ToolOrder.popular)
+        precondition(classic.cards.allSatisfy { $0.subviews.contains { $0 is ClassicTrendView } })
+        precondition(zip(classic.cards, classic.cards.dropFirst()).allSatisfy { $0.0.frame.minY == $0.1.frame.maxY })
+        let frames = classic.cards.map(\.frame)
+        let below = NSPoint(x: frames.last!.midX, y: frames.last!.minY + 1)
+        precondition(MenuCardReorder.destination(at: below, frames: frames, from: 0, vertical: true)?.index == frames.count - 1)
+        let moveDown = classic.cards[0].accessibilityCustomActions()!.first!
+        precondition(moveDown.name == L10n.text("Move down") && moveDown.handler?() == true)
+        precondition(classic.cards.map(\.frame) == frames && classic.cards.map(\.source) == toolOrder)
+        precondition(moveTool(.claude, to: 0, in: menu))
+        _ = verifyQuitPlacement()
+        precondition(AppDelegate(defaults: defaults, detectInstalledTools: { Set(ToolOrder.popular) }).panelLayout == .classic)
+        controller.layoutPopup.selectItem(at: 0)
+        send(controller.layoutPopup)
+        openMenu()
+        let combined = menu.items.first!.view as! SpeedPanelView
+        precondition(combined.layout == .chart && combined.chart.superview === combined)
+        _ = verifyQuitPlacement()
+        print("settings smoke: passed (source, status display, both panel views, persistence, action footer)")
         print("menu reorder tests: passed (fixed slots/source rebinding/VoiceOver actions/persistence)")
     }
 
@@ -2037,17 +2432,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         mode = .claude
         defaults.set(["opencode", "claude", "codex", "antigravity"], forKey: "toolOrder")
-        for available: Set<SourceMode> in [[.codex, .opencode], [.claude], [.hermes], [.cursor], []] {
+        for available: Set<SourceMode> in [[.codex, .opencode], [.claude], [.hermes], [.cursor], [.t3code], []] {
             setInstalled(available)
             installedSources = detectInstalledTools()
             rebuildMenu(menu)
             updateTitle()
-            precondition(Set(summaryItems.keys) == available)
+            let panel = menu.items.first!.view as! SpeedPanelView
+            precondition(Set(panel.cards.map(\.source)) == available)
             let controller = prepareSettings()
             let choices = controller.sourcePopup.itemArray.compactMap { ($0.representedObject as? String).flatMap(SourceMode.init(rawValue:)) }
             precondition(choices == [.auto] + toolOrder)
             precondition(controller.sourcePopup.selectedItem?.representedObject as? String == effectiveMode.rawValue)
-            let cards = menu.items.compactMap { $0.view as? SummaryMenuView }
+            let cards = panel.cards
             precondition(cards.count == available.count)
             precondition(cards.allSatisfy { ($0.onDrag != nil) == (available.count > 1) })
             precondition(mode == .claude, "Temporarily missing apps must not erase a pinned preference")
@@ -2061,7 +2457,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setInstalled([.codex, .opencode])
         installedSources = detectInstalledTools()
         moveTool(.codex, to: 0)
-        precondition(savedToolOrder == [.codex, .claude, .opencode, .antigravity, .hermes, .cursor], "Hidden tools retain their saved positions")
+        precondition(savedToolOrder == [.codex, .claude, .opencode, .antigravity, .hermes, .cursor, .t3code], "Hidden tools retain their saved positions")
         setInstalled(Set(ToolOrder.popular))
         installedSources = detectInstalledTools()
         precondition(effectiveMode == .claude && toolOrder == savedToolOrder)
@@ -2073,6 +2469,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 // MARK: - Headless verification mode
 
 func runOnce() -> Int32 {
+    if let idx = CommandLine.arguments.firstIndex(of: "--source"), idx + 1 < CommandLine.arguments.count,
+       CommandLine.arguments[idx + 1] == SourceMode.t3code.rawValue {
+        let dbIndex = CommandLine.arguments.firstIndex(of: "--db")
+        let path = dbIndex.flatMap { $0 + 1 < CommandLine.arguments.count ? CommandLine.arguments[$0 + 1] : nil }
+            ?? T3CodeReader.dbPath
+        let reader = T3CodeReader(dbPath: path)
+        reader.poll()
+        print("database:  \(path)")
+        guard reader.available else {
+            print("No readable T3 Code V2 database.")
+            return 1
+        }
+        print("samples:   \(reader.samples.count)")
+        print("generating:\(reader.inFlightStart() != nil)")
+        if let sample = reader.samples.last {
+            print("model:     \(sample.model)")
+            print("output:    \(sample.output)")
+            print("elapsed:   \(Fmt.secs(sample.elapsed))")
+            print("speed:     \(Fmt.tps(sample.effectiveTPS)) tok/s (whole turn, including tools/waits)")
+        }
+        return 0
+    }
     if let idx = CommandLine.arguments.firstIndex(of: "--source"), idx + 1 < CommandLine.arguments.count,
        CommandLine.arguments[idx + 1] == "cursor" {
         let logIndex = CommandLine.arguments.firstIndex(of: "--log")
@@ -2211,6 +2629,7 @@ func testPanel(previewDirectory: String?) throws {
     try testRolloutIncrementalRead()
     try testHermesReader()
     try testCursorReader()
+    try testT3CodeReader()
     try testAntigravityReader()
     try testOpenCodeReader()
     try testInstalledTools()
@@ -2222,44 +2641,213 @@ func testPanel(previewDirectory: String?) throws {
         print("app icon tests: passed (bundle declaration and ICNS loading)")
     }
     let now = Date()
+    func point(_ secondsAgo: TimeInterval, _ speed: Double) -> CallHistoryPoint {
+        CallHistoryPoint(completedAt: now.addingTimeInterval(-secondsAgo), speed: speed)
+    }
     func summary(active: Bool = true, live: Double? = 46.1, last: Double? = 31.7,
-                 history: [Double] = []) -> SpeedSummary {
+                 history: [CallHistoryPoint] = []) -> SpeedSummary {
         SpeedSummary(name: "Codex", active: active, live: live, last: last,
             completedAt: now.addingTimeInterval(-8), history: history, model: "test", measurement: "test")
     }
-    precondition(summary().value == "46.1")
-    for source in ToolOrder.popular {
+    precondition(summary().value == "46" && Fmt.tps(10) == "10.0" && Fmt.tps(8.24) == "8.2")
+    let panel = SpeedPanelView(sources: ToolOrder.popular)
+    precondition(abs(panel.chart.frame.height / panel.chart.frame.width - 3.0 / 5.0) < 0.001)
+    precondition(panel.chart.frame.minY > panel.cards[0].frame.maxY)
+    precondition(panel.cards.first!.frame.minX == panel.chart.frame.minX &&
+        abs(panel.cards.last!.frame.maxX - panel.chart.frame.maxX) < 0.001)
+    for card in panel.cards {
+        let source = card.source
         if Bundle.main.bundleURL.pathExtension == "app" {
             precondition(Bundle.main.url(forResource: source.rawValue, withExtension: "svg", subdirectory: "Logos") != nil,
                 "Missing bundled provider artwork: \(source.rawValue)")
         }
         precondition(ProviderLogo.image(source)?.isTemplate == true, "Missing template logo: \(source.rawValue)")
-        let card = SummaryMenuView(source: source)
-        card.toolTip = "stale detail"
         card.update(summary())
         precondition(card.toolTip == nil, "Hovering a tool card must not show detail text")
         let logo = card.subviews.compactMap { $0 as? NSImageView }.first!
-        let text = card.subviews.compactMap { $0 as? NSTextField }.filter { !$0.isHidden && $0.frame.minX == 40 }
-        precondition(text.count == 2)
-        let textBounds = text[0].frame.union(text[1].frame)
-        precondition(abs(logo.frame.midY - textBounds.midY) < 0.001, "Logo must center on both text lines")
+        let labels = card.subviews.compactMap { $0 as? NSTextField }
+        precondition(labels.map(\.stringValue) == ["46"], "Only the speed is visible")
+        let speed = labels[0]
+        precondition(speed.frame.minX < logo.frame.midX && logo.frame.midX < speed.frame.maxX &&
+            logo.frame.midX == card.bounds.midX && logo.frame.minY > speed.frame.maxY,
+            "The logo and number must share a centered column without overlapping")
+        precondition(logo.contentTintColor == PanelStyle.color(active: true) && speed.textColor == logo.contentTintColor)
+        card.update(summary(active: false))
+        precondition(logo.contentTintColor == PanelStyle.color(active: false) && speed.textColor == logo.contentTintColor)
     }
     precondition(summary().caption(now: now) == L10n.text("This turn"))
-    precondition(summary(active: false).value == "31.7")
+    precondition(summary(active: false).value == "32")
     precondition(summary(live: nil).caption(now: now) == L10n.text("Last · %@", L10n.text("%d s ago", 8)))
     precondition(summary(live: nil, last: nil).value == "—")
     precondition(summary(live: nil, last: nil).caption(now: now) == L10n.text("Waiting for data"))
     precondition(summary(active: false, live: nil, last: nil).caption(now: now) == L10n.text("No data"))
     precondition(summary(live: .nan, last: .infinity).value == "—")
-    precondition(summary(history: Array(1...20).map(Double.init) + [.nan, .infinity, 0, -1]).recent == Array(9...20).map(Double.init))
-    for (appearance, expected) in [(NSAppearance.Name.darkAqua, 1.0), (.aqua, 0.0)] {
+    let many = (1...75).map { point(Double(76 - $0) * 5, Double($0)) }
+    let invalid = [Double.nan, .infinity, 0, -1].map { point(0, $0) }
+    precondition(summary(history: Array(many.reversed()) + invalid).recent == Array(many.suffix(60)))
+    let stale = 24.0 * 3600
+    let oldHistory = [point(stale + 7 * 3600, 900), point(stale + 1800, 90), point(stale + 600, 70), point(stale, 30)]
+    var histories: [SourceMode: SpeedSummary] = [
+        .claude: summary(live: 9999, history: many),
+        .codex: summary(last: 30, history: [point(60, 30), point(30, 30)]),
+        .opencode: summary(live: nil, last: 30, history: [point(60, 30)]),
+        .hermes: summary(active: false, last: 30, history: oldHistory),
+        .cursor: summary(active: false, history: [point(0, 50)])
+    ]
+    panel.update(histories)
+    precondition(panel.chart.series.map(\.source) == [.claude, .codex, .opencode, .hermes, .cursor])
+    precondition(panel.chart.series[3].samples == Array(oldHistory.suffix(3)), "An idle source keeps its own recent history")
+    precondition(panel.chart.series.map(\.active) == [true, true, true, false, false])
+    let bounds = panel.chart.bounds
+    func plotted(_ series: [CallHistoryView.Series]) -> [[NSPoint]] {
+        CallHistoryView.project(series, in: bounds).map { $0.flatMap { $0 } }
+    }
+    let points = plotted(panel.chart.series)
+    precondition(points.map(\.count) == [60, 2, 1, 3, 1])
+    precondition(points[0][60 - 12].x == points[1][0].x && points[1][0] == points[2][0], "Same time means same X even across sources")
+    precondition(points[0][30 - 16].y == points[1][0].y && points[1][0].y == points[3][2].y,
+        "Active and idle speeds share one scale")
+    precondition(points[2][0].x < points[1][1].x && points[1][1].x < points[0][59].x,
+        "Each series ends at its own last observation")
+    precondition(panel.hoverText.isEmpty)
+    let visible = CallHistoryView.visibleReadings(panel.chart.series, in: bounds)
+    let latestVisible = visible[0].last!.last!
+    panel.chart.track(at: latestVisible.position)
+    let hoverFormatter = ChartReadoutFormatter(locale: Locale(identifier: L10n.language))
+    precondition(panel.chart.hoveredReading?.source == .claude &&
+        panel.chart.hoveredReading?.sample == many.last &&
+        panel.hoverText == L10n.text("%@ · %@ · %@ tok/s", SourceMode.claude.label,
+            hoverFormatter.timestamp(latestVisible.sample.completedAt), hoverFormatter.speed(75)),
+        "Hover must report the real sample rather than an interpolated speed")
+    panel.chart.track(at: visible[3][0][0].position)
+    precondition(panel.chart.hoveredReading?.source == .hermes &&
+        panel.chart.hoveredReading?.sample == oldHistory[1],
+        "An idle reading shows its own recorded timestamp")
+    panel.chart.track(at: NSPoint(x: -1, y: -1))
+    precondition(panel.hoverText.isEmpty && panel.chart.hoveredReading == nil)
+    let activeOnly = plotted(panel.chart.series.filter(\.active))
+    precondition(zip(points.prefix(3), activeOnly).allSatisfy { mixed, only in mixed.map(\.x) == only.map(\.x) },
+        "Neither older nor newer idle data may change the active time scale")
+    precondition(abs((points[3][1].x - points[3][0].x) / (points[3][2].x - points[3][1].x) - 2) < 0.001 &&
+        points[4][0].x == bounds.midX, "Idle samples preserve relative timing, including a centered singleton")
+    let strokeSafe = bounds.insetBy(dx: 2, dy: 2)
+    precondition(points.flatMap { $0 }.allSatisfy { strokeSafe.contains($0) })
+    func project(_ samples: [CallHistoryPoint]) -> [[NSPoint]] {
+        CallHistoryView.project([.init(source: .cursor, active: false, samples: samples)], in: bounds)[0]
+    }
+    let flat = project([point(100, 3000), point(0, 3000)])
+    precondition(flat[0].allSatisfy { $0.y == bounds.midY })
+    let crowded = [point(300, 40), point(159, 45), point(158, 5000), point(157, 55),
+        point(157, 50), point(0, 60)]
+    let sparse = CallHistoryView.visibleReadings([.init(source: .claude, active: true, samples: crowded)], in: bounds)[0][0]
+    precondition(sparse.map(\.sample) == [crowded[0], crowded[4], crowded[5]],
+        "Dense samples use a real representative point, including for duplicate timestamps")
+    precondition(sparse[1].position.y == bounds.midY, "Unshown peaks must not compress the visible speed scale")
+    let single = project([point(3600 * 24 * 400, Double.greatestFiniteMagnitude)])
+    precondition(single == [[NSPoint(x: bounds.midX, y: bounds.midY)]], "An old singleton is not replaced or stretched to the present")
+    let high = project([point(220, 100), point(200, 3000), point(0, 5000)])[0]
+    precondition(high[0].y < high[1].y && high[1].y < high[2].y, "High speeds must not clip or plateau")
+    let spike = point(60, 5000)
+    let clean = [point(120, 40), point(0, 50)]
+    let spikedHistory = [clean[0], spike, clean[1]]
+    let spikedPanel = SpeedPanelView(sources: [.claude])
+    spikedPanel.update([.claude: summary(history: spikedHistory)])
+    precondition(spikedPanel.cards[0].summary?.history == spikedHistory &&
+        spikedPanel.chart.series[0].samples == clean &&
+        plotted(spikedPanel.chart.series)[0] == project(clean).flatMap { $0 },
+        "An isolated spike must not distort the chart or mutate the original history")
+    for legitimate in [[point(120, 40), spike, point(30, 4800), point(0, 50)],
+                       [clean[0], spike], [point(2400, 40), spike, clean[1]],
+                       [clean[0], point(60, 125), clean[1]]] {
+        precondition(CallHistoryView.withoutIsolatedSpikes(legitimate) == legitimate)
+    }
+    precondition(abs((high[2].x - high[1].x) / (high[1].x - high[0].x) - 10) < 0.001, "Time gaps must scale linearly")
+    let spaced = project([point(4000, 50), point(3900, 60), point(2600, 55), point(1210, 90), point(10, 100), point(10, 120)])
+    precondition(spaced.map(\.count) == [2, 1, 3] && spaced[2][1].x == spaced[2][2].x)
+    let path = CallHistoryView.linePath(spaced)
+    precondition(path.elementCount == 5 && path.element(at: 1, associatedPoints: nil) == .curveTo &&
+        path.element(at: 2, associatedPoints: nil) == .moveTo &&
+        path.element(at: 4, associatedPoints: nil) == .lineTo,
+        "Distinct timestamps produce curves, gaps break the path, and duplicate timestamps stay vertical")
+    let uneven = [NSPoint(x: 0, y: 0), NSPoint(x: 1, y: 200),
+                  NSPoint(x: 180, y: 201), NSPoint(x: 182, y: 0)]
+    let smooth = CallHistoryView.linePath([uneven])
+    for (index, end) in uneven.dropFirst().enumerated() {
+        let start = uneven[index]
+        var controls = [NSPoint](repeating: .zero, count: 3)
+        let kind = controls.withUnsafeMutableBufferPointer {
+            smooth.element(at: index + 1, associatedPoints: $0.baseAddress)
+        }
+        precondition(kind == .curveTo && controls[2] == end)
+        precondition(controls.allSatisfy {
+            (start.x...end.x).contains($0.x) &&
+            (min(start.y, end.y)...max(start.y, end.y)).contains($0.y)
+        }, "Smoothing must not overshoot even with uneven timestamps")
+    }
+    let limited = SpeedPanelView(sources: [.codex])
+    limited.update(histories)
+    precondition(limited.chart.series.map(\.source) == [.codex], "Hidden tools must not affect the chart")
+    let calls = [point(10, 6), point(0, 12)]
+    limited.update([.codex: summary(live: 241, history: calls)])
+    precondition(limited.cards[0].summary?.value == "241" && limited.chart.series[0].samples == calls,
+        "Changing the live number must not change the completed-call curve")
+    let activeTrace = CallHistoryView.Series(source: .claude, active: true, samples: [])
+    let idleTrace = CallHistoryView.Series(source: .codex, active: false, samples: [])
+    precondition(activeTrace.strokeWidth == 3.6 && idleTrace.strokeWidth == 2.8)
+    for (appearance, white) in [(NSAppearance.Name.darkAqua, CGFloat(1)), (.aqua, CGFloat(0))] {
         NSAppearance(named: appearance)!.performAsCurrentDrawingAppearance {
-            let color = PanelStyle.activeColor.usingColorSpace(.deviceRGB)!
-            precondition(abs(Double(color.redComponent) - expected) < 0.001)
-            precondition(abs(Double(color.alphaComponent) - 0.9) < 0.001)
+            for active in [true, false] {
+                let color = PanelStyle.color(active: active).usingColorSpace(.sRGB)!
+                precondition(color.redComponent == white && color.greenComponent == white && color.blueComponent == white)
+                precondition(active ? color.alphaComponent == 1 : (0.4..<0.9).contains(color.alphaComponent))
+            }
+            let idleInk = idleTrace.ink.usingColorSpace(.sRGB)!
+            precondition(idleInk.redComponent == white && idleInk.alphaComponent < 0.3)
         }
     }
-    print("panel tests: passed (current/history/waiting/invalid values/12 samples/light & dark colors)")
+    let plotBitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(bounds.width), pixelsHigh: Int(bounds.height),
+        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    NSGraphicsContext.saveGraphicsState()
+    let graphics = NSGraphicsContext(bitmapImageRep: plotBitmap)!
+    NSGraphicsContext.current = graphics
+    graphics.cgContext.clear(bounds)
+    panel.chart.draw(bounds)
+    NSGraphicsContext.restoreGraphicsState()
+    precondition(plotBitmap.colorAt(x: 20, y: 20)?.alphaComponent == 0 &&
+        plotBitmap.colorAt(x: Int(latestVisible.position.x), y: Int(bounds.height - latestVisible.position.y))?.alphaComponent ?? 0 > 0,
+        "The chart must paint the data but not the background")
+    let singleTrace = CallHistoryView(frame: bounds)
+    singleTrace.update([.init(source: .claude, active: true, samples: [point(0, 50)])])
+    singleTrace.track(at: NSPoint(x: bounds.midX, y: bounds.midY))
+    precondition(singleTrace.hoveredReading != nil, "Removing markers does not disable hover")
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = graphics
+    graphics.cgContext.clear(bounds)
+    singleTrace.draw(bounds)
+    NSGraphicsContext.restoreGraphicsState()
+    for dx in -7...7 {
+        for dy in -7...7 {
+            precondition(plotBitmap.colorAt(x: Int(bounds.midX) + dx, y: Int(bounds.midY) + dy)?.alphaComponent == 0,
+                "Do not draw single-point or hover markers")
+        }
+    }
+    histories[.hermes] = summary(active: true, last: 30, history: oldHistory)
+    panel.update(histories)
+    precondition(!panel.chart.series.contains { $0.source == .hermes }, "An active series outside the active window must not be reanchored")
+    histories[.hermes] = summary(active: false, last: 30, history: oldHistory)
+    let idleCalls = histories.mapValues { summary(active: false, last: $0.last, history: $0.history) }
+    panel.update(idleCalls)
+    let idlePoints = plotted(panel.chart.series)
+    precondition(panel.chart.series.count == 5 && panel.chart.series.allSatisfy { !$0.active } &&
+        idlePoints[3] == points[3] && idlePoints[2][0].x == bounds.midX,
+        "All-idle mode keeps each history, and switching state moves observations to their own timeline")
+    var idleWithWaiting = idleCalls
+    idleWithWaiting[.antigravity] = summary(active: true, live: 250, history: [])
+    panel.update(idleWithWaiting)
+    precondition(plotted(panel.chart.series) == idlePoints, "An active source without completed calls must not suppress or reshape idle history")
+    limited.update([.codex: summary(history: invalid)])
+    precondition(limited.chart.series.isEmpty && CallHistoryView.project([], in: bounds).isEmpty)
+    print("panel tests: passed (active time alignment, independent idle history, shared speeds, spikes, hover, transparency and gaps)")
 
     guard let directory = previewDirectory else { return }
     try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
@@ -2274,41 +2862,48 @@ func testPanel(previewDirectory: String?) throws {
         print("preview: \(path)")
     }
     for dark in [true, false] {
-        let height = 108 + CGFloat(ToolOrder.popular.count) * 56
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: height), styleMask: [.borderless], backing: .buffered, defer: false)
+        let height = SpeedPanelView.height + PanelFooterView.height + 12
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: PanelStyle.width, height: height), styleMask: [.borderless], backing: .buffered, defer: false)
         window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         let root = window.contentView!
         root.wantsLayer = true
         root.layer?.backgroundColor = NSColor(white: dark ? 0.13 : 0.96, alpha: 1).cgColor
-        let header = PanelHeaderView(frame: .zero)
-        header.frame.origin.y = height - 34
-        root.addSubview(header)
-        let examples: [(SourceMode, Bool, Double?, Double?, [Double])] = [
-            (.claude, true, 113, 99, [65, 80, 75, 110, 98, 125, 104, 115, 106, 131, 120, 113]),
-            (.codex, true, 46.1, 31.7, [22, 28, 24, 40, 32, 39, 51, 36, 42, 35, 49, 46]),
-            (.opencode, false, nil, 16.2, [8, 14, 11, 13, 19, 15, 20, 16, 14, 18, 17, 16.2]),
-            (.antigravity, true, nil, 30.8, [22, 28, 31, 20, 34, 24, 29, 32, 26, 33, 29, 30.8]),
-            (.hermes, false, nil, 34.8, [18, 25, 22, 31, 28, 36, 30, 33, 29, 38, 32, 34.8]),
-            (.cursor, false, nil, nil, [])
+        let panel = SpeedPanelView(sources: ToolOrder.popular)
+        panel.frame.origin.y = PanelFooterView.height + 6
+        root.addSubview(panel)
+        let examples: [(SourceMode, Bool, Double?, [(TimeInterval, Double)])] = [
+            (.claude, true, 113, [(68, 65), (64, 79), (62, 74), (35, 91), (31, 109), (29, 94),
+                (24, 121), (22, 105), (17, 124), (14, 118), (11, 130), (8, 113), (6, 116), (3, 101), (1, 99)]),
+            (.codex, true, 46.1, [(56, 22), (52, 25), (48, 23), (43, 40), (41, 32), (27, 52), (23, 36),
+                (20, 42), (17, 35), (14, 45), (10, 32)]),
+            (.opencode, false, nil, [(63, 9), (58, 14), (51, 11), (42, 15), (37, 13), (31, 18), (25, 16)]),
+            (.antigravity, true, 56, [(53, 50), (46, 65), (42, 56), (36, 58), (32, 54), (26, 64), (21, 58), (16, 71), (10, 55), (4, 60)]),
+            (.hermes, false, nil, [(1507, 34), (1498, 41), (1489, 34), (1484, 42), (1477, 36)]),
+            (.cursor, false, nil, [(3180, 8.4)]),
+            (.t3code, false, nil, [(180, 24.5), (90, 31.2)])
         ]
-        for (index, entry) in examples.enumerated() {
-            let (source, active, live, last, history) = entry
-            let view = SummaryMenuView(source: source)
-            view.frame.origin.y = height - 90 - CGFloat(index) * 56
-            precondition(view.frame.minY >= 74, "Preview cards must not overlap the settings and quit actions")
-            view.update(SpeedSummary(name: source.label, active: active, live: live, last: last,
-                completedAt: now.addingTimeInterval(-8), history: history, model: "test", measurement: "test"))
-            root.addSubview(view)
-        }
-        for (index, title) in [L10n.text("Settings") + "…", L10n.text("Quit")].enumerated() {
-            let action = PanelActionButton(title: title, shortcut: index == 0 ? "⌘," : "⌘Q")
-            action.frame.origin.y = index == 0 ? 40 : 6
-            root.addSubview(action)
-        }
-        let separator = PanelSeparatorView(frame: .zero)
-        separator.frame.origin.y = 32
-        root.addSubview(separator)
+        panel.update(Dictionary(uniqueKeysWithValues: examples.map { entry in
+            let (source, active, live, readings) = entry
+            let history = readings.map { point($0.0 * 60, $0.1) }
+            return (source, SpeedSummary(name: source.label, active: active, live: live, last: history.last?.speed,
+                completedAt: history.last?.completedAt, history: history, model: "test", measurement: "test"))
+        }))
+        let footer = PanelFooterView(
+            settings: NSMenuItem(title: L10n.text("Settings") + "…", action: nil, keyEquivalent: ","),
+            quit: NSMenuItem(title: L10n.text("Quit"), action: nil, keyEquivalent: "q"))
+        footer.frame.origin.y = 6
+        root.addSubview(footer)
         try capture(root, name: dark ? "panel-dark.png" : "panel-light.png")
+        panel.chart.track(at: CallHistoryView.visibleReadings(panel.chart.series, in: panel.chart.bounds).first?.last?.last?.position)
+        try capture(root, name: dark ? "panel-hover-dark.png" : "panel-hover-light.png")
+        panel.chart.track(at: nil)
+        let allIdle = examples.map { source, _, _, readings in
+            let history = readings.map { point($0.0 * 60, $0.1) }
+            return (source, SpeedSummary(name: source.label, active: false, live: nil, last: history.last?.speed,
+                completedAt: history.last?.completedAt, history: history, model: "test", measurement: "test"))
+        }
+        panel.update(Dictionary(uniqueKeysWithValues: allIdle))
+        try capture(root, name: dark ? "panel-idle-dark.png" : "panel-idle-light.png")
         let settings = SettingsWindowController()
         settings.window?.appearance = window.appearance
         settings.update(SettingsState(sources: ToolOrder.popular, source: .auto, display: .speedAndUnit))
@@ -2340,33 +2935,42 @@ func testPresentationPreferences() {
         for (key, value) in table {
             precondition(!value.isEmpty && formats(key) == formats(value), "Invalid translation: \(language) \(key)")
         }
+        let locale = Locale(identifier: language)
+        let formatter = ChartReadoutFormatter(locale: locale)
+        let date = Calendar.current.date(from: DateComponents(year: 2026, month: 11, day: 23, hour: 14, minute: 37, second: 51))!
+        let tomorrow = Calendar.current.date(byAdding: .day, value: 1, to: date)!
+        let minuteTime = formatter.timestamp(date, now: date)
+        let earlierTime = formatter.timestamp(date, now: tomorrow)
+        precondition(minuteTime.contains("37") && !minuteTime.contains("51") &&
+            earlierTime != minuteTime && !earlierTime.contains("51"))
+        precondition(formatter.speed(7.5) == "7\(locale.decimalSeparator ?? ".")5")
     }
     precondition(L10n.text("Missing translation falls back to English") == "Missing translation falls back to English")
     print("localization tests: passed (8 languages, matching/fallback/completeness/format arguments); selected=\(L10n.language)")
 
     precondition(ToolOrder.normalized([]) == ToolOrder.popular)
-    precondition(ToolOrder.normalized(["auto", "unknown", "opencode", "opencode"]) == [.opencode, .claude, .codex, .antigravity, .hermes, .cursor])
-    precondition(ToolOrder.normalized(["claude", "codex", "opencode", "antigravity", "hermes"]) == ToolOrder.popular, "Existing preferences gain Cursor without reordering tools")
+    precondition(ToolOrder.normalized(["auto", "unknown", "opencode", "opencode"]) == [.opencode, .claude, .codex, .antigravity, .hermes, .cursor, .t3code])
+    precondition(ToolOrder.normalized(["claude", "codex", "opencode", "antigravity", "hermes", "cursor"]) == ToolOrder.popular, "Existing preferences gain T3 Code without reordering tools")
     precondition(ToolOrder.moving(.claude, to: -1, in: ToolOrder.popular) == ToolOrder.popular)
     precondition(ToolOrder.moving(.antigravity, to: ToolOrder.popular.count, in: ToolOrder.popular) == ToolOrder.popular)
     precondition(ToolOrder.moving(.auto, to: 0, in: ToolOrder.popular) == ToolOrder.popular)
-    precondition(ToolOrder.moving(.claude, to: 3, in: ToolOrder.popular) == [.codex, .opencode, .antigravity, .claude, .hermes, .cursor])
-    precondition(ToolOrder.moving(.antigravity, to: 0, in: ToolOrder.popular) == [.antigravity, .claude, .codex, .opencode, .hermes, .cursor])
-    let frames = (0..<4).map { NSRect(x: 0, y: 168 - $0 * 56, width: 360, height: 56) }
-    precondition(MenuCardReorder.destination(at: NSPoint(x: 100, y: 220), frames: frames, from: 3) == .init(index: 0, slot: 0))
-    precondition(MenuCardReorder.destination(at: NSPoint(x: 100, y: 4), frames: frames, from: 0) == .init(index: 3, slot: 4))
-    precondition(MenuCardReorder.destination(at: NSPoint(x: 100, y: 60), frames: frames, from: 0) == .init(index: 2, slot: 3))
-    for point in [NSPoint(x: -1, y: 100), NSPoint(x: 361, y: 100), NSPoint(x: 100, y: -1), NSPoint(x: 100, y: 225)] {
+    precondition(ToolOrder.moving(.claude, to: 3, in: ToolOrder.popular) == [.codex, .opencode, .antigravity, .claude, .hermes, .cursor, .t3code])
+    precondition(ToolOrder.moving(.antigravity, to: 0, in: ToolOrder.popular) == [.antigravity, .claude, .codex, .opencode, .hermes, .cursor, .t3code])
+    let frames = (0..<4).map { NSRect(x: $0 * 56, y: 0, width: 56, height: 72) }
+    precondition(MenuCardReorder.destination(at: NSPoint(x: 4, y: 36), frames: frames, from: 3) == .init(index: 0, slot: 0))
+    precondition(MenuCardReorder.destination(at: NSPoint(x: 220, y: 36), frames: frames, from: 0) == .init(index: 3, slot: 4))
+    precondition(MenuCardReorder.destination(at: NSPoint(x: 164, y: 36), frames: frames, from: 0) == .init(index: 2, slot: 3))
+    for point in [NSPoint(x: -1, y: 36), NSPoint(x: 225, y: 36), NSPoint(x: 100, y: -1), NSPoint(x: 100, y: 73)] {
         precondition(MenuCardReorder.destination(at: point, frames: frames, from: 0) == nil)
     }
-    precondition(MenuCardReorder.destination(at: NSPoint(x: 100, y: 200), frames: frames, from: 0) == nil)
+    precondition(MenuCardReorder.destination(at: NSPoint(x: 36, y: 36), frames: frames, from: 0) == nil)
     precondition(MenuCardReorder.destination(at: .zero, frames: [], from: 0) == nil)
-    precondition(MenuCardReorder.destination(at: NSPoint(x: 100, y: 200), frames: [frames[0]], from: 0) == nil)
+    precondition(MenuCardReorder.destination(at: NSPoint(x: 36, y: 36), frames: [frames[0]], from: 0) == nil)
     for active in [false, true] {
         for display in StatusDisplay.allCases {
             let hidden = !active || display == .iconOnly
             precondition(display.usesLightning(active: active) == hidden)
-            precondition(display.title(active: active, speed: 46.1, elapsed: 8) == (hidden ? "" : display == .speedAndUnit ? "46.1 tok/s" : "46.1"))
+            precondition(display.title(active: active, speed: 46.1, elapsed: 8) == (hidden ? "" : display == .speedAndUnit ? "46 tok/s" : "46"))
             precondition(display.title(active: active, speed: nil, elapsed: 8) == (hidden ? "" : L10n.text("%d s", 8)))
         }
     }
@@ -2377,25 +2981,10 @@ func testPresentationPreferences() {
     precondition(AppDelegate.preferredSource(mode: .auto, activity: [(.codex, false, now.addingTimeInterval(-30)), (.hermes, false, now)]) == .hermes)
     precondition(AppDelegate.preferredSource(mode: .auto, activity: [(.cursor, false, now), (.codex, true, now.addingTimeInterval(-30))]) == .codex)
     precondition(AppDelegate.preferredSource(mode: .auto, activity: [(.cursor, false, now), (.codex, false, now.addingTimeInterval(-30))]) == .cursor)
+    precondition(AppDelegate.preferredSource(mode: .auto, activity: [(.t3code, false, now), (.codex, true, now.addingTimeInterval(-30))]) == .codex)
+    precondition(AppDelegate.preferredSource(mode: .auto, activity: [(.t3code, false, now), (.codex, false, now.addingTimeInterval(-30))]) == .t3code)
 
-    for values: [Double] in [[], [12], [12, 24], [0, 100, 0, 100, 1], [50, 50, 50], [1, 2, 4, 100]] {
-        let points = values.enumerated().map { NSPoint(x: Double($0.offset) * 10, y: $0.element) }
-        let path = SparklineView.smoothPath(points)
-        precondition(path.elementCount == points.count)
-        var previous = points.first ?? .zero
-        for index in 1..<max(1, path.elementCount) {
-            var controls = [NSPoint](repeating: .zero, count: 3)
-            precondition(path.element(at: index, associatedPoints: &controls) == .curveTo)
-            let start = previous, end = controls[2]
-            for step in 0...100 {
-                let t = Double(step) / 100, u = 1 - t
-                let y = u*u*u*start.y + 3*u*u*t*controls[0].y + 3*u*t*t*controls[1].y + t*t*t*end.y
-                precondition(y >= min(start.y, end.y) - 0.0001 && y <= max(start.y, end.y) + 0.0001, "Smooth curves must not overshoot")
-            }
-            previous = end
-        }
-    }
-    print("presentation tests: passed (ordering/status modes/active-source priority/smooth curves without overshoot)")
+    print("presentation tests: passed (ordering/status modes/active-source priority)")
 
     let suite = "io.github.thinkofuture.tokspeed.test.\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
@@ -2430,6 +3019,7 @@ func testInstalledTools() throws {
     try write(".gemini/antigravity/conversation_summaries.db")
     try write(".hermes/logs/agent.log")
     try write("Library/Application Support/Cursor/User/globalStorage/state.vscdb")
+    try write(".t3/userdata/statev2.sqlite")
     precondition(detect().isEmpty, "Leftover data is not an installation")
     try write(".local/bin/codex", executable: true)
     try write(".opencode/bin/opencode", executable: true)
@@ -2439,8 +3029,15 @@ func testInstalledTools() throws {
     precondition(detect(path: path) == [.codex, .opencode, .claude], "A non-executable file is not a CLI")
     try write(".local/bin/hermes", executable: true)
     try write(".local/bin/cursor", executable: true)
+    try write(".local/bin/t3code", executable: true)
     try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.appendingPathComponent("custom/bin/antigravity").path)
     precondition(detect(path: path) == Set(ToolOrder.popular))
+    try fm.removeItem(at: root.appendingPathComponent(".local/bin/t3code"))
+    try write("Applications/T3 Code (Beta).app/Contents/MacOS/T3 Code (Beta)", executable: true)
+    try PropertyListSerialization.data(fromPropertyList: ["CFBundleExecutable": "T3 Code (Beta)",
+        "CFBundleIdentifier": "com.t3tools.t3code", "CFBundlePackageType": "APPL"], format: .xml, options: 0)
+        .write(to: root.appendingPathComponent("Applications/T3 Code (Beta).app/Contents/Info.plist"))
+    precondition(detect(path: path).contains(.t3code), "T3 Code desktop-only installations must be visible")
     try fm.removeItem(at: root.appendingPathComponent(".local/bin/cursor"))
     try write("Applications/Cursor.app/Contents/MacOS/Cursor", executable: true)
     try PropertyListSerialization.data(fromPropertyList: ["CFBundleExecutable": "Cursor",

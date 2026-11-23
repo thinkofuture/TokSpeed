@@ -13,7 +13,13 @@
 "%d h ago" = "hace %d h";
 "%d d ago" = "hace %d d";
 "Last · %@" = "Última · %@";
-"Trend: last %d calls, independent scale; not per-second data." = "Tendencia: últimas %d llamadas, escala independiente; no son datos por segundo.";
+"Recent completed calls" = "Últimas llamadas completadas";
+"No completed calls yet" = "Aún no hay llamadas completadas";
+"Bright lines share a completion-time scale. Faint lines show each idle tool’s own recent history, not the same times. All lines share a speed scale. Long gaps are not connected." = "Las líneas destacadas comparten una escala de tiempo según la hora de finalización. Las líneas tenues muestran el historial reciente de cada herramienta inactiva en su propia escala temporal. Todas comparten la escala de velocidad. Los intervalos largos quedan sin unir.";
+"Live" = "Directo";
+"Last" = "Última";
+"Recorded" = "Medida";
+"%@, %@, %@" = "%@, %@, %@";
 "Active" = "Activo";
 "Idle" = "Inactivo";
 "%@, %@, %@, %@ tokens per second" = "%@, %@, %@, %@ tokens por segundo";
@@ -26,8 +32,8 @@
 "Settings" = "Ajustes";
 "Source" = "Fuente";
 "Drag to reorder" = "Arrastrar para reordenar";
-"Move up" = "Subir";
-"Move down" = "Bajar";
+"Move left" = "Mover a la izquierda";
+"Move right" = "Mover a la derecha";
 "This turn: output tokens / total completed-call duration, excluding tool execution; not instantaneous per-token speed." = "Esta respuesta: tokens de salida / duración total de las llamadas completadas, sin ejecución de herramientas; no es velocidad instantánea por token.";
 "Claude measures from request start to the first complete output block, including time to first token." = "Claude mide desde el inicio de la solicitud hasta el primer bloque de salida completo, incluida la espera del primer token.";
 "%d s" = "%d s";
@@ -42,3 +48,10 @@
 "Last call: output tokens / full API time." = "Última llamada: tokens de salida / duración total de la llamada a la API.";
 "Cursor hook: last completed turn. Recorded output tokens / whole-turn time from prompt submit to loop stop, including thinking, tools and waiting; not pure model generation speed. While a turn runs, the menu bar shows elapsed time only." = "Cursor hook: último turno completado. Tokens de salida registrados / duración total, del envío del prompt al final del bucle, incluidos razonamiento, herramientas y esperas; no es velocidad pura del modelo. Durante un turno, la barra de menús muestra solo el tiempo transcurrido.";
 "Completed calls: streaming speed when available, otherwise end to end. This turn combines those calls without the time between them." = "Llamadas completadas: velocidad de generación en directo cuando está disponible; si no, de extremo a extremo. El cálculo del turno excluye el tiempo entre llamadas.";
+"%@ · %@ · %@ tok/s" = "%@ · %@ · %@ tokens/s";
+"Panel view" = "Vista del panel";
+"Combined chart" = "Gráfico combinado";
+"Per-agent list" = "Lista por agente";
+"Move up" = "Mover arriba";
+"Move down" = "Mover abajo";
+"T3 Code: last completed turn. Output tokens / full turn duration, including tools and waiting." = "T3 Code: último turno completado. Tokens de salida / duración total del turno, incluidos herramientas y esperas.";

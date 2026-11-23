@@ -13,7 +13,13 @@
 "%d h ago" = "%d 時間前";
 "%d d ago" = "%d 日前";
 "Last · %@" = "前回 · %@";
-"Trend: last %d calls, independent scale; not per-second data." = "傾向：直近 %d 回の呼び出し。縦軸は個別の尺度で、秒単位のデータではありません。";
+"Recent completed calls" = "直近の完了した呼び出し";
+"No completed calls yet" = "完了した呼び出しはまだありません";
+"Bright lines share a completion-time scale. Faint lines show each idle tool’s own recent history, not the same times. All lines share a speed scale. Long gaps are not connected." = "強調された線は呼び出しの完了時刻を共通の時間軸で示します。薄い線は待機中のツールごとの最近の履歴を、それぞれの時間軸で示します。速度の尺度はすべて共通です。間隔が長い場合は線でつなぎません。";
+"Live" = "ライブ";
+"Last" = "前回";
+"Recorded" = "計測済み";
+"%@, %@, %@" = "%@、%@、%@";
 "Active" = "実行中";
 "Idle" = "待機中";
 "%@, %@, %@, %@ tokens per second" = "%@、%@、%@、毎秒 %@ トークン";
@@ -26,8 +32,8 @@
 "Settings" = "設定";
 "Source" = "ソース";
 "Drag to reorder" = "ドラッグして並べ替え";
-"Move up" = "上に移動";
-"Move down" = "下に移動";
+"Move left" = "左に移動";
+"Move right" = "右に移動";
 "This turn: output tokens / total completed-call duration, excluding tool execution; not instantaneous per-token speed." = "今回：出力トークン数 ÷ 完了した呼び出しの合計時間。ツール実行時間は除外し、トークン単位の瞬間速度ではありません。";
 "Claude measures from request start to the first complete output block, including time to first token." = "Claude はリクエスト開始から最初の完全な出力ブロックまでを計測し、最初のトークンの待ち時間を含みます。";
 "%d s" = "%d s";
@@ -42,3 +48,10 @@
 "Last call: output tokens / full API time." = "前回の呼び出し：出力トークン数 ÷ API の総所要時間。";
 "Cursor hook: last completed turn. Recorded output tokens / whole-turn time from prompt submit to loop stop, including thinking, tools and waiting; not pure model generation speed. While a turn runs, the menu bar shows elapsed time only." = "Cursor Hook：完了した最後のターン。記録された出力トークン数 ÷ プロンプト送信からループ終了までの全体時間（思考・ツール・待機時間を含む。これは純粋なモデル生成速度ではない）。実行中はメニューバーに経過時間だけ表示。";
 "Completed calls: streaming speed when available, otherwise end to end. This turn combines those calls without the time between them." = "完了した呼び出しのストリーミング速度を表示します。計測できない場合は開始から完了までで算出します。このターンの速度に呼び出し間の時間は含まれません。";
+"%@ · %@ · %@ tok/s" = "%@ · %@ · %@ トークン/秒";
+"Panel view" = "パネル表示";
+"Combined chart" = "統合グラフ";
+"Per-agent list" = "エージェント別リスト";
+"Move up" = "上に移動";
+"Move down" = "下に移動";
+"T3 Code: last completed turn. Output tokens / full turn duration, including tools and waiting." = "T3 Code：完了した最後のターン。出力トークン数 ÷ ターン全体の時間（ツール実行・待機時間を含む）。";

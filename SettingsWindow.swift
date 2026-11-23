@@ -11,21 +11,35 @@ private final class SettingsWindow: NSWindow {
     }
 }
 
+enum PanelLayout: String, CaseIterable {
+    case chart, classic
+
+    var label: String {
+        switch self {
+        case .chart: return L10n.text("Combined chart")
+        case .classic: return L10n.text("Per-agent list")
+        }
+    }
+}
+
 struct SettingsState: Equatable {
     var sources: [SourceMode]
     var source: SourceMode
     var display: StatusDisplay
+    var layout: PanelLayout = .chart
 }
 
 final class SettingsWindowController: NSWindowController {
     let sourcePopup = NSPopUpButton()
     let displayPopup = NSPopUpButton()
+    let layoutPopup = NSPopUpButton()
     private(set) var state: SettingsState?
     var onSource: ((SourceMode) -> Void)?
     var onDisplay: ((StatusDisplay) -> Void)?
+    var onLayout: ((PanelLayout) -> Void)?
 
     init() {
-        let window = SettingsWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 120),
+        let window = SettingsWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 156),
             styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
         window.title = L10n.text("Settings")
         window.isReleasedWhenClosed = false
@@ -38,13 +52,17 @@ final class SettingsWindowController: NSWindowController {
         displayPopup.target = self
         displayPopup.action = #selector(changeDisplay(_:))
         displayPopup.setAccessibilityLabel(L10n.text("Display"))
+        layoutPopup.target = self
+        layoutPopup.action = #selector(changeLayout(_:))
+        layoutPopup.setAccessibilityLabel(L10n.text("Panel view"))
         let sourceLabel = NSTextField(labelWithString: L10n.text("Source") + ":")
         let displayLabel = NSTextField(labelWithString: L10n.text("Display") + ":")
-        let grid = NSGridView(views: [[sourceLabel, sourcePopup], [displayLabel, displayPopup]])
+        let layoutLabel = NSTextField(labelWithString: L10n.text("Panel view") + ":")
+        let grid = NSGridView(views: [[sourceLabel, sourcePopup], [displayLabel, displayPopup], [layoutLabel, layoutPopup]])
         grid.rowSpacing = 14
         grid.columnSpacing = 16
         grid.column(at: 0).xPlacement = .trailing
-        grid.column(at: 0).width = 84
+        grid.column(at: 0).width = max(84, layoutLabel.intrinsicContentSize.width)
         grid.column(at: 1).xPlacement = .fill
         grid.rowAlignment = .firstBaseline
         sourceLabel.setContentHuggingPriority(.required, for: .horizontal)
@@ -76,6 +94,9 @@ final class SettingsWindowController: NSWindowController {
         displayPopup.removeAllItems()
         displayPopup.addItems(withTitles: StatusDisplay.allCases.map(\.label))
         displayPopup.selectItem(at: StatusDisplay.allCases.firstIndex(of: next.display) ?? 0)
+        layoutPopup.removeAllItems()
+        layoutPopup.addItems(withTitles: PanelLayout.allCases.map(\.label))
+        layoutPopup.selectItem(at: PanelLayout.allCases.firstIndex(of: next.layout) ?? 0)
     }
 
     @objc private func changeSource(_ sender: NSPopUpButton) {
@@ -86,6 +107,11 @@ final class SettingsWindowController: NSWindowController {
     @objc private func changeDisplay(_ sender: NSPopUpButton) {
         guard StatusDisplay.allCases.indices.contains(sender.indexOfSelectedItem) else { return }
         onDisplay?(StatusDisplay.allCases[sender.indexOfSelectedItem])
+    }
+
+    @objc private func changeLayout(_ sender: NSPopUpButton) {
+        guard PanelLayout.allCases.indices.contains(sender.indexOfSelectedItem) else { return }
+        onLayout?(PanelLayout.allCases[sender.indexOfSelectedItem])
     }
 
 }

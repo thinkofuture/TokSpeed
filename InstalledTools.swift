@@ -1,12 +1,13 @@
 import AppKit
 
 enum InstalledTools {
-    private static let applications: [SourceMode: (name: String, id: String)] = [
-        .codex: ("Codex", "com.openai.codex"),
-        .opencode: ("OpenCode", "ai.opencode.desktop"),
-        .claude: ("Claude", "com.anthropic.claudefordesktop"),
-        .antigravity: ("Antigravity", "com.google.antigravity"),
-        .cursor: ("Cursor", "com.todesktop.230313mzl4w4u92")
+    private static let applications: [SourceMode: (names: [String], id: String)] = [
+        .codex: (["Codex"], "com.openai.codex"),
+        .opencode: (["OpenCode"], "ai.opencode.desktop"),
+        .claude: (["Claude"], "com.anthropic.claudefordesktop"),
+        .antigravity: (["Antigravity"], "com.google.antigravity"),
+        .cursor: (["Cursor"], "com.todesktop.230313mzl4w4u92"),
+        .t3code: (["T3 Code", "T3 Code (Beta)", "T3 Code (Alpha)"], "com.t3tools.t3code")
     ]
 
     static func detect(environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -44,7 +45,9 @@ enum InstalledTools {
             guard let app = applications[source] else { return false }
             if let url = applicationURL(app.id), installedApp(url) { return true }
             return (applicationDirectories ?? ["/Applications", (home as NSString).appendingPathComponent("Applications")]).contains { root in
-                installedApp(URL(fileURLWithPath: root).appendingPathComponent("\(app.name).app"))
+                app.names.contains { name in
+                    installedApp(URL(fileURLWithPath: root).appendingPathComponent("\(name).app"))
+                }
             }
         })
     }

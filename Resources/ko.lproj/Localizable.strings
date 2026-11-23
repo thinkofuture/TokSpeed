@@ -13,7 +13,13 @@
 "%d h ago" = "%d시간 전";
 "%d d ago" = "%d일 전";
 "Last · %@" = "지난 호출 · %@";
-"Trend: last %d calls, independent scale; not per-second data." = "추이: 최근 %d회 호출, 개별 세로축 사용. 초 단위 데이터가 아닙니다.";
+"Recent completed calls" = "최근 완료된 호출";
+"No completed calls yet" = "아직 완료된 호출이 없습니다";
+"Bright lines share a completion-time scale. Faint lines show each idle tool’s own recent history, not the same times. All lines share a speed scale. Long gaps are not connected." = "강조된 선은 호출 완료 시각을 공통 시간축에 표시합니다. 흐린 선은 대기 중인 도구별 최근 기록을 각자의 시간축에 표시합니다. 모든 선의 속도 눈금은 같습니다. 긴 공백은 선으로 잇지 않습니다.";
+"Live" = "실시간";
+"Last" = "지난 호출";
+"Recorded" = "측정값";
+"%@, %@, %@" = "%@, %@, %@";
 "Active" = "활성";
 "Idle" = "유휴";
 "%@, %@, %@, %@ tokens per second" = "%@, %@, %@, 초당 %@ 토큰";
@@ -26,8 +32,8 @@
 "Settings" = "설정";
 "Source" = "소스";
 "Drag to reorder" = "드래그하여 순서 변경";
-"Move up" = "위로 이동";
-"Move down" = "아래로 이동";
+"Move left" = "왼쪽으로 이동";
+"Move right" = "오른쪽으로 이동";
 "This turn: output tokens / total completed-call duration, excluding tool execution; not instantaneous per-token speed." = "이번 응답: 출력 토큰 수 ÷ 완료된 호출의 총 소요 시간. 도구 실행 시간은 제외하며 토큰별 순간 속도가 아닙니다.";
 "Claude measures from request start to the first complete output block, including time to first token." = "Claude는 요청 시작부터 첫 번째 완전한 출력 블록까지 측정하며 첫 토큰 대기 시간을 포함합니다.";
 "%d s" = "%d s";
@@ -42,3 +48,10 @@
 "Last call: output tokens / full API time." = "지난 호출: 출력 토큰 ÷ 전체 API 호출 시간.";
 "Cursor hook: last completed turn. Recorded output tokens / whole-turn time from prompt submit to loop stop, including thinking, tools and waiting; not pure model generation speed. While a turn runs, the menu bar shows elapsed time only." = "Cursor hook: 마지막으로 완료된 턴. 기록된 출력 토큰 / 프롬프트 제출부터 루프 종료까지의 전체 시간(추론·도구·대기 포함)이지 순수 모델 생성 속도는 아닙니다. 진행 중에는 메뉴 막대에 경과 시간만 표시됩니다.";
 "Completed calls: streaming speed when available, otherwise end to end. This turn combines those calls without the time between them." = "완료된 호출의 스트리밍 속도를 표시하고, 측정할 수 없으면 시작부터 완료까지의 시간으로 계산합니다. 이번 턴의 속도에는 호출 사이의 시간이 포함되지 않습니다.";
+"%@ · %@ · %@ tok/s" = "%@ · %@ · %@ 토큰/초";
+"Panel view" = "패널 보기";
+"Combined chart" = "통합 그래프";
+"Per-agent list" = "에이전트별 목록";
+"Move up" = "위로 이동";
+"Move down" = "아래로 이동";
+"T3 Code: last completed turn. Output tokens / full turn duration, including tools and waiting." = "T3 Code: 마지막으로 완료된 턴. 출력 토큰 / 도구 실행 및 대기를 포함한 전체 턴 시간.";

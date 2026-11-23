@@ -13,7 +13,13 @@
 "%d h ago" = "%d h ago";
 "%d d ago" = "%d d ago";
 "Last · %@" = "Last · %@";
-"Trend: last %d calls, independent scale; not per-second data." = "Trend: last %d calls, independent scale; not per-second data.";
+"Recent completed calls" = "Recent completed calls";
+"No completed calls yet" = "No completed calls yet";
+"Bright lines share a completion-time scale. Faint lines show each idle tool’s own recent history, not the same times. All lines share a speed scale. Long gaps are not connected." = "Bright lines share a completion-time scale. Faint lines show each idle tool’s own recent history, not the same times. All lines share a speed scale. Long gaps are not connected.";
+"Live" = "Live";
+"Last" = "Last";
+"Recorded" = "Recorded";
+"%@, %@, %@" = "%@, %@, %@";
 "Active" = "Active";
 "Idle" = "Idle";
 "%@, %@, %@, %@ tokens per second" = "%@, %@, %@, %@ tokens per second";
@@ -26,8 +32,8 @@
 "Settings" = "Settings";
 "Source" = "Source";
 "Drag to reorder" = "Drag to reorder";
-"Move up" = "Move up";
-"Move down" = "Move down";
+"Move left" = "Move left";
+"Move right" = "Move right";
 "This turn: output tokens / total completed-call duration, excluding tool execution; not instantaneous per-token speed." = "This turn: output tokens / total completed-call duration, excluding tool execution; not instantaneous per-token speed.";
 "Completed calls: streaming speed when available, otherwise end to end. This turn combines those calls without the time between them." = "Completed calls: streaming speed when available, otherwise end to end. This turn combines those calls without the time between them.";
 "Claude measures from request start to the first complete output block, including time to first token." = "Claude measures from request start to the first complete output block, including time to first token.";
@@ -42,3 +48,10 @@
 "Last call: estimated stream speed (first chunk to API completion)." = "Last call: estimated stream speed (first chunk to API completion).";
 "Last call: output tokens / full API time." = "Last call: output tokens / full API time.";
 "Cursor hook: last completed turn. Recorded output tokens / whole-turn time from prompt submit to loop stop, including thinking, tools and waiting; not pure model generation speed. While a turn runs, the menu bar shows elapsed time only." = "Cursor hook: last completed turn. Recorded output tokens / whole-turn time from prompt submit to loop stop, including thinking, tools and waiting; not pure model generation speed. While a turn runs, the menu bar shows elapsed time only.";
+"%@ · %@ · %@ tok/s" = "%@ · %@ · %@ tok/s";
+"Panel view" = "Panel view";
+"Combined chart" = "Combined chart";
+"Per-agent list" = "Per-agent list";
+"Move up" = "Move up";
+"Move down" = "Move down";
+"T3 Code: last completed turn. Output tokens / full turn duration, including tools and waiting." = "T3 Code: last completed turn. Output tokens / full turn duration, including tools and waiting.";
