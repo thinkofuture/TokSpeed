@@ -4,9 +4,9 @@ import Foundation
 // TokSpeed itself is not open. Only allowlisted numeric usage/timing fields and
 // opaque correlation ids are retained; prompts, replies, tool data, workspace
 // paths, email addresses and credentials are never written.
-enum CursorHook {
-    static let marker = "--cursor-hook"
-    static let events = ["beforeSubmitPrompt", "afterAgentResponse", "stop"]
+package enum CursorHook {
+    package static let marker = "--cursor-hook"
+    package static let events = ["beforeSubmitPrompt", "stop"]
     static let maxLogBytes: Int64 = 4 * 1024 * 1024
     private static let maxInputBytes = 2 * 1024 * 1024
     private static let maxValueBytes = 160
@@ -31,7 +31,7 @@ enum CursorHook {
         "session_id", "sessionId",
     ]
 
-    static func logPath(environment: [String: String] = ProcessInfo.processInfo.environment,
+    package static func logPath(environment: [String: String] = ProcessInfo.processInfo.environment,
                         home: String = NSHomeDirectory()) -> String {
         if let override = environment["TOKSPEED_CURSOR_HOOK_LOG"], !override.isEmpty {
             return override
@@ -42,13 +42,30 @@ enum CursorHook {
 
     /// Handles `TokSpeed --cursor-hook <event>` before AppKit starts.
     @discardableResult
-    static func runIfRequested() -> Bool {
+    package static func runIfRequested() -> Bool {
         let arguments = CommandLine.arguments
         guard let index = arguments.firstIndex(of: marker) else { return false }
         let event = index + 1 < arguments.count ? arguments[index + 1] : ""
+        process(event: event)
+        return true
+    }
+
+    /// Handles `tokspeed-cursor-hook [<event> | --cursor-hook <event>]` in the lightweight helper.
+    package static func runFromHelper() {
+        let arguments = CommandLine.arguments
+        let event: String
+        if let index = arguments.firstIndex(of: marker) {
+            event = index + 1 < arguments.count ? arguments[index + 1] : ""
+        } else {
+            event = arguments.count > 1 ? arguments[1] : ""
+        }
+        process(event: event)
+    }
+
+    private static func process(event: String) {
         guard events.contains(event) else {
             writeResponse(Data("{}".utf8))
-            return true
+            return
         }
         let wall = Int64(Date().timeIntervalSince1970 * 1_000_000_000)
         let monotonic = Int64(clamping: DispatchTime.now().uptimeNanoseconds)
@@ -59,7 +76,6 @@ enum CursorHook {
             append(data, to: logPath())
         }
         writeResponse(Data((event == "beforeSubmitPrompt" ? "{\"continue\":true}" : "{}").utf8))
-        return true
     }
 
     /// The record format shared by the temporary Python probe and this collector.
@@ -147,26 +163,36 @@ enum CursorHook {
         return (payload, "ok")
     }
 
-    private static func append(_ data: Data, to path: String) {
+    static func append(_ data: Data, to path: String, maxBytes: Int64 = maxLogBytes) {
         let directory = (path as NSString).deletingLastPathComponent
         if !directory.isEmpty {
             try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true,
                                                      attributes: [.posixPermissions: 0o700])
         }
-        let descriptor = open(path, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW, 0o600)
-        guard descriptor >= 0 else { return }
-        defer { close(descriptor) }
-        guard flock(descriptor, LOCK_EX) == 0 else { return }
-        defer { _ = flock(descriptor, LOCK_UN) }
-        _ = fchmod(descriptor, 0o600)
+        let lockPath = directory.isEmpty ? "\(path).lock" : (directory as NSString).appendingPathComponent(".lock")
+        let lockDescriptor = open(lockPath, O_WRONLY | O_CREAT | O_NOFOLLOW, 0o600)
+        guard lockDescriptor >= 0 else { return }
+        defer { close(lockDescriptor) }
+        guard flock(lockDescriptor, LOCK_EX) == 0 else { return }
+        defer { _ = flock(lockDescriptor, LOCK_UN) }
 
         var info = stat()
-        guard fstat(descriptor, &info) == 0 else { return }
-        if info.st_size > maxLogBytes {
-            _ = ftruncate(descriptor, 0)
-        } else if info.st_size > 0 {
+        if lstat(path, &info) == 0 {
+            guard (info.st_mode & S_IFMT) == S_IFREG else { return }
+            if info.st_size > 0, info.st_size + Int64(data.count) + 1 > maxBytes {
+                guard rename(path, path + ".1") == 0 else { return }
+            }
+        }
+
+        let descriptor = open(path, O_RDWR | O_CREAT | O_APPEND | O_NOFOLLOW, 0o600)
+        guard descriptor >= 0 else { return }
+        defer { close(descriptor) }
+        _ = fchmod(descriptor, 0o600)
+
+        var activeInfo = stat()
+        if fstat(descriptor, &activeInfo) == 0, activeInfo.st_size > 0 {
             var last: UInt8 = 0
-            if pread(descriptor, &last, 1, info.st_size - 1) == 1, last != 0x0A {
+            if pread(descriptor, &last, 1, activeInfo.st_size - 1) == 1, last != 0x0A {
                 writeAll(Data([0x0A]), to: descriptor)
             }
         }

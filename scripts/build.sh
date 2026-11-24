@@ -14,8 +14,9 @@ mkdir -p "$BUILD_DIR"
 BUILD_DIR="$(cd "$BUILD_DIR" && pwd)"
 APP="$BUILD_DIR/TokSpeed.app"
 RESOURCES="$APP/Contents/Resources"
+HELPERS="$APP/Contents/Helpers"
 ICONSET="$BUILD_DIR/AppIcon.iconset"
-mkdir -p "$APP/Contents/MacOS" "$RESOURCES/Logos" "$BUILD_DIR/ModuleCache" "$ICONSET"
+mkdir -p "$APP/Contents/MacOS" "$HELPERS" "$RESOURCES/Logos" "$ICONSET"
 
 # Build all standard and Retina icon sizes from the checked-in source image.
 # Only macOS system tools are used; the desktop original is never needed.
@@ -28,16 +29,39 @@ for size in 16 32 128 256 512; do
 done
 iconutil --convert icns "$ICONSET" --output "$RESOURCES/AppIcon.icns"
 
-# Compile a relative source path so #filePath does not embed the builder's home.
-# Swift 5 language mode matches the existing AppKit application's threading model.
-xcrun swiftc -swift-version 5 -O \
-    -target "$(uname -m)-apple-macosx13.0" \
-    -module-cache-path "$BUILD_DIR/ModuleCache" \
-    -framework AppKit -lsqlite3 \
-    main.swift Localization.swift InstalledTools.swift SettingsWindow.swift MenuCardReorder.swift HermesReader.swift HermesReaderTests.swift HermesPluginInstaller.swift AntigravityReaderTests.swift OpenCodeReaderTests.swift CursorHook.swift CursorHookInstaller.swift CursorReader.swift CursorReaderTests.swift T3CodeReader.swift T3CodeReaderTests.swift -o "$APP/Contents/MacOS/TokSpeed"
+if [[ "${UNIVERSAL:-0}" == "1" ]]; then
+    ARCHS=(arm64 x86_64)
+else
+    ARCHS=("$(uname -m)")
+fi
+
+APP_SLICES=()
+HOOK_SLICES=()
+for arch in "${ARCHS[@]}"; do
+    SWIFT_ARGS=(--configuration release --scratch-path "$BUILD_DIR/SwiftPM/$arch" --arch "$arch")
+    swift build "${SWIFT_ARGS[@]}"
+    BIN_DIR="$(swift build "${SWIFT_ARGS[@]}" --show-bin-path)"
+    APP_SLICES+=("$BIN_DIR/TokSpeed")
+    HOOK_SLICES+=("$BIN_DIR/tokspeed-cursor-hook")
+done
+
+package_binary() {
+    local output="$1"
+    shift
+    if [[ $# -eq 1 ]]; then
+        cp "$1" "$output"
+    else
+        lipo -create "$@" -output "$output"
+    fi
+}
+
+# Production binaries omit all test code; the Cursor hook helper avoids AppKit and SQLite3.
+package_binary "$APP/Contents/MacOS/TokSpeed" "${APP_SLICES[@]}"
+package_binary "$HELPERS/tokspeed-cursor-hook" "${HOOK_SLICES[@]}"
 
 cp Resources/Info.plist "$APP/Contents/Info.plist"
-cp Resources/Logos/*.svg Resources/Logos/NOTICE.md "$RESOURCES/Logos/"
+# Remove artwork that no longer ships when reusing a build directory.
+rsync -a --delete Resources/Logos/ "$RESOURCES/Logos/"
 mkdir -p "$RESOURCES/HermesPlugin"
 cp Resources/HermesPlugin/plugin.yaml Resources/HermesPlugin/__init__.py "$RESOURCES/HermesPlugin/"
 for localization in Resources/*.lproj; do
@@ -48,6 +72,7 @@ cp LICENSE "$RESOURCES/LICENSE"
 plutil -lint "$APP/Contents/Info.plist"
 
 # Local ad-hoc signing only; no developer certificate or notarization is needed.
+codesign --force --sign - --timestamp=none "$HELPERS/tokspeed-cursor-hook"
 codesign --force --sign - --timestamp=none "$APP"
 # Finder displays the bundle directory's timestamp, not the executable's.
 touch "$APP"

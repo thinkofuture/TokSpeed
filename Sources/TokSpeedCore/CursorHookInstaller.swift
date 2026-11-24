@@ -1,10 +1,18 @@
 import Foundation
+import TokSpeedHookCore
 
 // Installs only TokSpeed-owned observer entries. Existing hooks, their relative
 // order and unknown configuration keys are preserved. The temporary
 // `tokspeed-cursor-probe.py` entries from earlier diagnostics are removed so
 // only one collector writes measurements.
 enum CursorHookInstaller {
+    enum HookStatus: Equatable {
+        case notInstalled
+        case installed
+        case outdatedPath
+        case error(String)
+    }
+
     struct Status {
         var changed = false
         var backup: String?
@@ -12,7 +20,70 @@ enum CursorHookInstaller {
         var config = ""
     }
 
-    static func install(executable: String = Bundle.main.executablePath ?? CommandLine.arguments.first ?? "",
+    static func defaultExecutable(bundle: Bundle = .main, fallback: String? = CommandLine.arguments.first) -> String {
+        let helper = bundle.bundleURL.appendingPathComponent("Contents/Helpers/tokspeed-cursor-hook").path
+        if FileManager.default.isExecutableFile(atPath: helper) {
+            return helper
+        }
+        return bundle.executablePath ?? fallback ?? ""
+    }
+
+    static func status(executable: String = CursorHookInstaller.defaultExecutable(),
+                       home: String = NSHomeDirectory()) -> HookStatus {
+        let fm = FileManager.default
+        let root = (home as NSString).appendingPathComponent(".cursor")
+        let config = (root as NSString).appendingPathComponent("hooks.json")
+        if isSymlink(root) || isSymlink(config) {
+            return .error("Refusing to follow a symlink at Cursor hooks.json")
+        }
+        guard fm.fileExists(atPath: config) else { return .notInstalled }
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: config)) else {
+            return .error("Cursor hook configuration could not be read")
+        }
+        guard let parsedObject = try? JSONSerialization.jsonObject(with: data),
+              let object = parsedObject as? [String: Any] else {
+            return .error("Cursor hooks.json is not a JSON object")
+        }
+        if let version = object["version"], !isOne(version) {
+            return .error("Unsupported Cursor hook configuration version")
+        }
+        guard let hooks = object["hooks"] as? [String: Any] else {
+            return object["hooks"] == nil ? .notInstalled : .error("Cursor hooks.json has an invalid hooks object")
+        }
+
+        var ownedCount = 0
+        var hasLegacyOrUnexpected = false
+        var matchedEvents = Set<String>()
+        let expectedPrefix = executable.hasPrefix("/") && fm.isExecutableFile(atPath: executable)
+            ? "\(shellQuote(executable)) \(CursorHook.marker)"
+            : nil
+
+        for (event, value) in hooks {
+            guard let entries = value as? [Any] else {
+                return .error("Cursor hooks.json has an invalid \(event) list")
+            }
+            for item in entries {
+                guard let entry = item as? [String: Any],
+                      let command = entry["command"] as? String,
+                      isOwned(command) else { continue }
+                ownedCount += 1
+                if let expectedPrefix,
+                   CursorHook.events.contains(event),
+                   command == "\(expectedPrefix) \(event)" {
+                    matchedEvents.insert(event)
+                } else {
+                    hasLegacyOrUnexpected = true
+                }
+            }
+        }
+        if ownedCount == 0 { return .notInstalled }
+        if !hasLegacyOrUnexpected && matchedEvents == Set(CursorHook.events) && ownedCount == CursorHook.events.count {
+            return .installed
+        }
+        return .outdatedPath
+    }
+
+    static func install(executable: String = CursorHookInstaller.defaultExecutable(),
                         home: String = NSHomeDirectory()) -> Status {
         guard executable.hasPrefix("/"), FileManager.default.isExecutableFile(atPath: executable) else {
             var status = Status()

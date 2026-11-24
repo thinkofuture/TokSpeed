@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import SQLite3
+@testable import TokSpeedApp
 
 func testAntigravityReader() throws {
     let fm = FileManager.default
@@ -211,7 +212,7 @@ func testAntigravityReader() throws {
     let card = SpeedPanelView(sources: [.antigravity]).cards[0]
     card.update(mixed.summary)
     let labels = card.subviews.compactMap { $0 as? NSTextField }
-    precondition(labels.map(\.stringValue) == ["150"] && card.toolTip == nil &&
+    precondition(labels.map(\.stringValue) == ["150"] && card.toolTip?.contains(L10n.text("Output: %@ tokens", "150")) == true &&
         card.accessibilityLabel()?.contains(L10n.text("Recorded")) == true,
         "Show only speed visually while identifying recorded speed to VoiceOver")
     let speedLabel = labels[0]
@@ -246,5 +247,32 @@ func testAntigravityReader() throws {
     cliOnly.poll(now: clock)
     precondition(cliOnly.samples.contains { $0.output == 200 && $0.recordedCompletion == nil } &&
         cliOnly.summary.recent == [completed], "A start timestamp must not stand in for an unrecorded completion")
-    print("antigravity tests: passed (thresholds/CLI + desktop/non-newest or missing summary/pending steps/in-place WAL speed updates/session isolation/expiry)")
+
+    // T3 Code Antigravity ACP discovery + multi-session titles.
+    let fakeHome = root.appendingPathComponent("home")
+    let t3Acp = fakeHome.appendingPathComponent(".t3/userdata/providers/antigravity/hash1/antigravity-acp")
+    try fm.createDirectory(at: t3Acp.appendingPathComponent("conversations"), withIntermediateDirectories: true)
+    let discovered = AntigravityReader.defaultRoots(home: fakeHome.path, environment: [:])
+    precondition(discovered.contains(t3Acp.path), "defaultRoots must discover T3 Code antigravity-acp roots")
+    let t3Summary = t3Acp.appendingPathComponent("conversation_summaries.db")
+    try sql(t3Summary, """
+        CREATE TABLE conversation_summaries (conversation_id TEXT, title TEXT, status TEXT, last_modified_time INTEGER);
+        INSERT INTO conversation_summaries VALUES ('\(old)', 'Auth refactor', 'CASCADE_RUN_STATUS_RUNNING', 200);
+        INSERT INTO conversation_summaries VALUES ('\(new)', 'Chart polish', 'CASCADE_RUN_STATUS_IDLE', 150);
+        """)
+    try sql(file(t3Acp, old), schema + """
+        INSERT INTO steps VALUES (0, 14, 3, \(started(10)));
+        INSERT INTO steps VALUES (1, 15, 2, \(started(5)));
+        INSERT INTO gen_metadata VALUES (0, \(generation(180, step: 1)));
+        """)
+    try sql(file(t3Acp, new), schema + """
+        INSERT INTO steps VALUES (0, 15, 3, \(step(second - 20)));
+        INSERT INTO gen_metadata VALUES (0, \(generation(95, step: 0)));
+        """)
+    let t3Reader = AntigravityReader(roots: discovered)
+    t3Reader.poll(now: clock)
+    let visible = t3Reader.summary.visibleSessions(now: clock)
+    precondition(visible.count == 2 && visible.map(\.title) == ["Auth refactor", "Chart polish"])
+    precondition(visible.map { $0.speedText(now: clock) } == ["180", "95"])
+    print("antigravity tests: passed (thresholds/CLI + desktop + T3 ACP/multi-session titles/pending steps/in-place WAL speed updates/session isolation/expiry)")
 }

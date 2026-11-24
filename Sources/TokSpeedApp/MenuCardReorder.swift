@@ -17,11 +17,38 @@ enum MenuCardReorder {
         return destination == index ? nil : Destination(index: destination, slot: slot)
     }
 
+    static func trackClick(_ card: SummaryMenuView, event: NSEvent,
+                           onTrackingChange: ((Bool) -> Void)? = nil,
+                           onClick: () -> Void) {
+        guard let window = card.window else { return }
+        onTrackingChange?(true)
+        defer { onTrackingChange?(false) }
+        while card.window === window && window.isVisible {
+            guard let next = NSApp.nextEvent(matching: [.leftMouseDragged, .leftMouseUp, .keyDown],
+                until: Date(timeIntervalSinceNow: 0.1), inMode: .eventTracking, dequeue: true) else { continue }
+            if next.type == .keyDown {
+                if next.keyCode == 53 { continue }
+                NSApp.sendEvent(next)
+                continue
+            }
+            if next.type == .leftMouseUp {
+                let local = card.convert(next.locationInWindow, from: nil)
+                if next.window === window && card.bounds.contains(local) {
+                    onClick()
+                }
+                return
+            }
+        }
+    }
+
     static func track(_ card: SummaryMenuView, event: NSEvent, cards: [SummaryMenuView], vertical: Bool,
+                      onTrackingChange: ((Bool) -> Void)? = nil,
+                      onClick: (() -> Void)? = nil,
                       onDrop: (Int) -> Void) {
         guard cards.count > 1, let from = cards.firstIndex(where: { $0 === card }),
               let window = card.window, let root = window.contentView,
               cards.allSatisfy({ $0.window === window }) else { return }
+        onTrackingChange?(true)
         let frames = cards.map { window.convertToScreen($0.convert($0.bounds, to: nil)) }
         let start = window.convertPoint(toScreen: event.locationInWindow)
         let originalFrame = card.convert(card.bounds, to: root)
@@ -35,6 +62,7 @@ enum MenuCardReorder {
             insertionLine?.removeFromSuperview()
             card.isDragging = false
             if pushedCursor { NSCursor.pop() }
+            onTrackingChange?(false)
         }
 
         while card.window === window && window.isVisible {
@@ -94,7 +122,14 @@ enum MenuCardReorder {
                     y: originalFrame.minY + (vertical ? (root.isFlipped ? -1 : 1) * (point.y - start.y) : 0)))
             }
             if next.type == .leftMouseUp {
-                if let target { onDrop(target.index) }
+                if !dragging {
+                    let local = card.convert(next.locationInWindow, from: nil)
+                    if next.window === window && card.bounds.contains(local) {
+                        onClick?()
+                    }
+                } else if let target {
+                    onDrop(target.index)
+                }
                 return
             }
         }

@@ -19,7 +19,7 @@
 
 <br>
 
-## Bauen und starten
+## Bauen, testen und starten
 
 macOS 13+ und Xcode Command Line Tools erforderlich.
 
@@ -27,6 +27,22 @@ macOS 13+ und Xcode Command Line Tools erforderlich.
 bash scripts/build.sh
 open build/TokSpeed.app
 ```
+
+Universal Binary erstellen oder die komplette Test-Suite ausführen:
+
+```sh
+UNIVERSAL=1 bash scripts/build.sh
+bash scripts/test.sh
+```
+
+## Ansichten & Funktionen
+
+- **Trenddiagramm**: Zeigt bis zu 60 abgeschlossene Aufrufe je sichtbarem Tool auf einer gemeinsamen Geschwindigkeitsskala mit eindeutigen Farben für aktive Tools und minimaler Y-Achsen-Beschriftung. Beim Überfahren eines Punkts oder einer Karte werden Kurve und Details hervorgehoben.
+- **Detaillierte Liste**: Unter **Einstellungen → Ansicht** aktivierbar. Bei zwei oder mehr gleichzeitigen oder kürzlichen Sitzungen erscheinen eingerückte Unterzeilen mit Titel und Geschwindigkeit.
+- **Anpinnen & Sortieren**: Klicke auf eine Karte, um das Tool als Hauptquelle anzupinnen oder zu lösen; ziehe Karten (oder nutze VoiceOver-Aktionen), um die Reihenfolge zu ändern.
+- **Einstellungen & Integrationen**: **Bei Anmeldung starten**, Tools ein-/ausblenden, Reihenfolge zurücksetzen, lokale **Diagnose** (`TokSpeed --diagnostics`) sowie explizite Verwaltung von **Cursor-Hook** (schlanker Helper ohne AppKit, 4-MB-Logrotation) und **Hermes-Plugin** (`--install-hermes-plugin [--force]`).
+
+Für Streaming-Schätzungen und die Laufzeit laufender Hermes-Anfragen das installierte Plugin mit `hermes plugins enable tokspeed-metrics` aktivieren. Ohne Plugin zeigt TokSpeed abgeschlossene Aufrufe aus `logs/agent.log`.
 
 ## Lizenz
 

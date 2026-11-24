@@ -1,11 +1,15 @@
 import Foundation
+import XCTest
+@testable import TokSpeedApp
+@testable import TokSpeedHookCore
 
-func testCursorReader() throws {
+func testCursorReader(helper: String) throws {
+    precondition(CursorHook.events == ["beforeSubmitPrompt", "stop"], "Unused afterAgentResponse hook should not be registered")
     try testCursorHookRecord()
-    try testCursorHookProcess()
+    try testCursorHookProcess(helper: helper)
     try testCursorReaderFile()
     try testCursorHookInstaller()
-    print("cursor tests: passed (hook lifecycle/dedupe/active/rotation/redaction/installer)")
+    print("cursor tests: passed (hook lifecycle/dedupe/active/rotation/redaction/installer/status)")
 }
 
 private func testCursorHookRecord() throws {
@@ -45,7 +49,7 @@ private func testCursorHookRecord() throws {
         wallNs: 1, monotonicNs: 2)["input_status"] as? String == "invalid_json")
 }
 
-private func testCursorHookProcess() throws {
+private func testCursorHookProcess(helper: String) throws {
     let fm = FileManager.default
     let root = fm.temporaryDirectory.appendingPathComponent("tokspeed-hook-\(UUID().uuidString)")
     try fm.createDirectory(at: root, withIntermediateDirectories: true)
@@ -53,14 +57,15 @@ private func testCursorHookProcess() throws {
     let log = root.appendingPathComponent("events.jsonl").path
     let secret = "PRIVATE_HOOK_PAYLOAD"
 
+    XCTAssertTrue(fm.isExecutableFile(atPath: helper), "Cursor hook helper missing: \(helper)")
     let first = try runHook("beforeSubmitPrompt",
         payload: ["conversation_id": "process-chat", "generation_id": "process-generation",
-                  "model": "grok-4.7", "prompt": secret], log: log)
+                  "model": "grok-4.7", "prompt": secret], log: log, executable: helper)
     precondition(first.trimmingCharacters(in: .whitespacesAndNewlines) == "{\"continue\":true}")
     let second = try runHook("stop",
         payload: ["conversation_id": "process-chat", "generation_id": "process-generation",
                   "model": "grok-4.7", "status": "completed", "output_tokens": 36,
-                  "input_tokens": 17852, "cache_read_tokens": 6016, "text": secret], log: log)
+                   "input_tokens": 17852, "cache_read_tokens": 6016, "text": secret], log: log, executable: helper)
     precondition(second.trimmingCharacters(in: .whitespacesAndNewlines) == "{}")
     let text = try String(contentsOfFile: log, encoding: .utf8)
     precondition(!text.contains(secret), "Hook process must not retain prompt or reply text")
@@ -73,11 +78,52 @@ private func testCursorHookProcess() throws {
     precondition(reader.samples[0].output == 36 && reader.samples[0].input == 17852)
     precondition(reader.samples[0].cachedInput == 6016)
     precondition(reader.inFlightStart == nil)
+
+    // Force exactly one rotation, between r2's start and stop.
+    let rotLog = root.appendingPathComponent("rotate.jsonl").path
+    let baseNs: Int64 = 1_790_000_000_000_000_000
+    let rStart = CursorHook.record(event: "beforeSubmitPrompt",
+        payload: ["conversation_id": "rot", "generation_id": "r1"], wallNs: baseNs, monotonicNs: 1)
+    let rStop = CursorHook.record(event: "stop",
+        payload: ["conversation_id": "rot", "generation_id": "r1", "status": "completed", "output_tokens": 50],
+        wallNs: baseNs + 2_000_000_000, monotonicNs: 2)
+    let r2Start = CursorHook.record(event: "beforeSubmitPrompt",
+        payload: ["conversation_id": "rot", "generation_id": "r2"], wallNs: baseNs + 5_000_000_000, monotonicNs: 3)
+    let r2Stop = CursorHook.record(event: "stop",
+        payload: ["conversation_id": "rot", "generation_id": "r2", "status": "completed", "output_tokens": 80],
+        wallNs: baseNs + 7_000_000_000, monotonicNs: 4)
+    let records = try [rStart, rStop, r2Start, r2Stop].map {
+        try JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys])
+    }
+    let limit = Int64(records.prefix(3).reduce(0) { $0 + $1.count + 1 })
+    let now = Date(timeIntervalSince1970: Double(baseNs) / 1_000_000_000 + 20)
+    let cachedReader = CursorReader(logPath: rotLog)
+    CursorHook.append(records[0], to: rotLog, maxBytes: limit)
+    cachedReader.poll(now: now)
+    XCTAssertNotNil(cachedReader.inFlightStart)
+    for record in records.dropFirst() {
+        CursorHook.append(record, to: rotLog, maxBytes: limit)
+    }
+    let backup = try Data(contentsOf: URL(fileURLWithPath: rotLog + ".1"))
+    XCTAssertEqual(backup, records.prefix(3).reduce(into: Data()) { $0.append($1); $0.append(0x0A) })
+    for reader in [cachedReader, CursorReader(logPath: rotLog)] {
+        reader.poll(now: now)
+        reader.poll(now: now)
+        XCTAssertEqual(reader.samples.map(\.output), [50, 80])
+        XCTAssertNil(reader.inFlightStart)
+    }
+
+    let partialLog = root.appendingPathComponent("partial.jsonl")
+    try Data("partial".utf8).write(to: partialLog)
+    CursorHook.append(records[0], to: partialLog.path)
+    let repaired = try Data(contentsOf: partialLog)
+    XCTAssertEqual(repaired, Data("partial\n".utf8) + records[0] + Data([0x0A]))
 }
 
-private func runHook(_ event: String, payload: [String: Any], log: String) throws -> String {
+private func runHook(_ event: String, payload: [String: Any], log: String,
+                     executable: String) throws -> String {
     let process = Process()
-    process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+    process.executableURL = URL(fileURLWithPath: executable)
     process.arguments = [CursorHook.marker, event]
     var environment = ProcessInfo.processInfo.environment
     environment["TOKSPEED_CURSOR_HOOK_LOG"] = log
@@ -257,9 +303,15 @@ private func testCursorHookInstaller() throws {
     let executable = root.appendingPathComponent("TokSpeed")
     try Data("fixture".utf8).write(to: executable)
     try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+    let otherExecutable = root.appendingPathComponent("OtherTokSpeed")
+    try Data("fixture2".utf8).write(to: otherExecutable)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: otherExecutable.path)
+
     let cursor = root.appendingPathComponent(".cursor")
     try fm.createDirectory(at: cursor, withIntermediateDirectories: true)
     let config = cursor.appendingPathComponent("hooks.json")
+    precondition(CursorHookInstaller.status(executable: executable.path, home: root.path) == .notInstalled)
+
     let original: [String: Any] = [
         "custom": "keep",
         "hooks": [
@@ -270,6 +322,8 @@ private func testCursorHookInstaller() throws {
     ]
     let originalData = try JSONSerialization.data(withJSONObject: original, options: [.sortedKeys])
     try originalData.write(to: config)
+    precondition(CursorHookInstaller.status(executable: executable.path, home: root.path) == .outdatedPath)
+
     let legacy = root.appendingPathComponent(
         "Library/Application Support/TokSpeed/cursor-hook-probe/events.jsonl")
     try fm.createDirectory(at: legacy.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -278,6 +332,9 @@ private func testCursorHookInstaller() throws {
     let installed = CursorHookInstaller.install(executable: executable.path, home: root.path)
     precondition(installed.error == nil && installed.changed)
     precondition(installed.backup.flatMap { try? Data(contentsOf: URL(fileURLWithPath: $0)) } == originalData)
+    precondition(CursorHookInstaller.status(executable: executable.path, home: root.path) == .installed)
+    precondition(CursorHookInstaller.status(executable: otherExecutable.path, home: root.path) == .outdatedPath)
+
     let installedData = try Data(contentsOf: config)
     precondition(installedData != originalData)
     let updated = try JSONSerialization.jsonObject(with: Data(contentsOf: config)) as! [String: Any]
@@ -285,7 +342,7 @@ private func testCursorHookInstaller() throws {
     let hooks = updated["hooks"] as! [String: Any]
     for event in CursorHook.events {
         let entries = hooks[event] as! [[String: Any]]
-        precondition(entries.count == (event == "stop" || event == "beforeSubmitPrompt" ? 2 : 1))
+        precondition(entries.count == 2)
         let command = entries[0]["command"] as! String
         precondition(command.hasPrefix(executable.path) && command.hasSuffix(event))
         precondition((entries[0]["timeout"] as? NSNumber)?.intValue == 5)
@@ -306,6 +363,7 @@ private func testCursorHookInstaller() throws {
 
     let removed = CursorHookInstaller.remove(home: root.path)
     precondition(removed.error == nil && removed.changed)
+    precondition(CursorHookInstaller.status(executable: executable.path, home: root.path) == .notInstalled)
     let afterRemoval = try JSONSerialization.jsonObject(with: Data(contentsOf: config)) as! [String: Any]
     let remaining = afterRemoval["hooks"] as! [String: Any]
     precondition((remaining["stop"] as! [[String: Any]]).compactMap { $0["command"] as? String } == ["existing-stop"])
@@ -320,6 +378,10 @@ private func testCursorHookInstaller() throws {
     let invalidStatus = CursorHookInstaller.install(executable: executable.path, home: invalid.path)
     let invalidData = try Data(contentsOf: invalidConfig)
     precondition(invalidStatus.error != nil && invalidData == Data("{".utf8))
+    if case .error = CursorHookInstaller.status(executable: executable.path, home: invalid.path) {
+    } else {
+        preconditionFailure("Invalid JSON must report .error status")
+    }
 
     let link = root.appendingPathComponent("link")
     try fm.createDirectory(at: link.appendingPathComponent(".cursor"), withIntermediateDirectories: true)

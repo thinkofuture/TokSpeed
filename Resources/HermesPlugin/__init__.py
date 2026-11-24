@@ -1,4 +1,4 @@
-"""Hermes post_api_request observer for TokSpeed (local metrics only)."""
+"""Hermes request observer for TokSpeed (local metrics only)."""
 
 from contextlib import suppress
 import fcntl
@@ -30,6 +30,14 @@ def _tokens(value):
     return type(value) is int and 0 <= value <= 100_000_000
 
 
+def _activity(root, event, *, session_id=None, api_request_id=None, started_at=None, **_ignored):
+    session, request = _digest(session_id), _digest(api_request_id)
+    if session and request and _epoch(started_at):
+        row = dict(v=1, event=event, session=session, request=request, started_at=started_at)
+        data = (json.dumps(row, separators=(",", ":")) + "\n").encode()
+        _append(root, data, name="activity.jsonl", limit=256 * 1024)
+
+
 def _observe(root, *, session_id=None, api_request_id=None, model=None, provider=None,
              started_at=None, ended_at=None, first_chunk_at=None, usage=None, **_ignored):
     # Do not inspect response, assistant_message, URL, headers or other payload fields.
@@ -50,16 +58,16 @@ def _observe(root, *, session_id=None, api_request_id=None, model=None, provider
     _append(root, data)
 
 
-def _append(root, data):
+def _append(root, data, *, name="calls.jsonl", limit=2 * 1024 * 1024):
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    target = root / "calls.jsonl"
+    target = root / name
     flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
     lock = os.open(root / ".lock", flags, 0o600)
     try:
         # Best-effort observer: competing writers must never stall a completed request.
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        if target.exists() and target.stat().st_size + len(data) > 2 * 1024 * 1024:
-            target.replace(root / "calls.jsonl.1")
+        if target.exists() and target.stat().st_size + len(data) > limit:
+            target.replace(root / (name + ".1"))
         fd = os.open(target, flags | os.O_APPEND, 0o600)
         try:
             if os.write(fd, data) != len(data):
@@ -76,8 +84,19 @@ def register(ctx):
 
     root = Path(get_hermes_home()) / "plugin-data" / "tokspeed-metrics"
 
+    def pre_api_request(**event):
+        with suppress(OSError, ValueError):
+            _activity(root, "start", **event)
+
+    def close_request(**event):
+        with suppress(OSError, ValueError):
+            _activity(root, "stop", **event)
+
     def post_api_request(**event):
+        close_request(**event)
         with suppress(OSError, ValueError):
             _observe(root, **event)
 
+    ctx.register_hook("pre_api_request", pre_api_request)
     ctx.register_hook("post_api_request", post_api_request)
+    ctx.register_hook("api_request_error", close_request)

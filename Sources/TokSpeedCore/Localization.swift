@@ -20,10 +20,18 @@ enum L10n {
     }
 
     static func table(_ language: String) -> [String: String] {
-        let bundled = Bundle.main.resourceURL?.appendingPathComponent("\(language).lproj/Localizable.strings")
-        let development = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .appendingPathComponent("Resources/\(language).lproj/Localizable.strings")
-        for url in [bundled, development].compactMap({ $0 }) {
+        let path = "\(language).lproj/Localizable.strings"
+        var roots = [Bundle.main.resourceURL].compactMap { $0 }
+        #if DEBUG
+        let development = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Resources")
+        roots.append(development)
+        #endif
+        for root in roots {
+            let url = root.appendingPathComponent(path)
             if let data = try? Data(contentsOf: url),
                let table = (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: String] {
                 return table

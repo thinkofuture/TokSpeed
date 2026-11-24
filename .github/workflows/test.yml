@@ -1,0 +1,22 @@
+name: macOS tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build and test both-architecture bundle
+        env:
+          UNIVERSAL: "1"
+        run: |
+          bash scripts/test.sh
+          for binary in build/TokSpeed.app/Contents/{MacOS/TokSpeed,Helpers/tokspeed-cursor-hook}; do
+            archs="$(lipo -archs "$binary")"
+            echo "$binary: $archs"
+            [[ " $archs " == *" arm64 "* && " $archs " == *" x86_64 "* ]]
+          done

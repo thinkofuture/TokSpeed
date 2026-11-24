@@ -6,8 +6,7 @@ enum InstalledTools {
         .opencode: (["OpenCode"], "ai.opencode.desktop"),
         .claude: (["Claude"], "com.anthropic.claudefordesktop"),
         .antigravity: (["Antigravity"], "com.google.antigravity"),
-        .cursor: (["Cursor"], "com.todesktop.230313mzl4w4u92"),
-        .t3code: (["T3 Code", "T3 Code (Beta)", "T3 Code (Alpha)"], "com.t3tools.t3code")
+        .cursor: (["Cursor"], "com.todesktop.230313mzl4w4u92")
     ]
 
     static func detect(environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -41,7 +40,17 @@ enum InstalledTools {
         return Set(ToolOrder.popular.filter { source in
             let command = source == .claude ? "claude" : source.rawValue
             if Set(directories).contains(where: { executable(($0 as NSString).appendingPathComponent(command)) }) { return true }
-            if source == .antigravity && Set(directories).contains(where: { executable(($0 as NSString).appendingPathComponent("agy")) }) { return true }
+            if source == .antigravity {
+                if Set(directories).contains(where: { executable(($0 as NSString).appendingPathComponent("agy")) }) { return true }
+                let t3Home = environment["T3CODE_HOME"].flatMap { $0.isEmpty ? nil : $0 }
+                    ?? (home as NSString).appendingPathComponent(".t3")
+                let providersRoot = ((t3Home as NSString).expandingTildeInPath as NSString)
+                    .appendingPathComponent("userdata/providers/antigravity")
+                if let entries = try? fileManager.contentsOfDirectory(atPath: providersRoot),
+                   entries.contains(where: { executable("\(providersRoot)/\($0)/antigravity-acp/bin/agentapi") }) {
+                    return true
+                }
+            }
             guard let app = applications[source] else { return false }
             if let url = applicationURL(app.id), installedApp(url) { return true }
             return (applicationDirectories ?? ["/Applications", (home as NSString).appendingPathComponent("Applications")]).contains { root in
@@ -50,5 +59,14 @@ enum InstalledTools {
                 }
             }
         })
+    }
+}
+
+enum SingleInstanceGuard {
+    static func ensureSingleInstance(bundleIdentifier: String? = Bundle.main.bundleIdentifier) -> Bool {
+        guard let bundleIdentifier, !bundleIdentifier.isEmpty else { return true }
+        let currentPID = NSRunningApplication.current.processIdentifier
+        let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+        return !running.contains { $0.processIdentifier != currentPID }
     }
 }
